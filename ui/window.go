@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"github.com/Bios-Marcel/cordless/util/text"
+	"github.com/Bios-Marcel/femto"
+	"github.com/Bios-Marcel/femto/runtime"
 	"github.com/mdp/qrterminal/v3"
 	"log"
 	"strings"
@@ -56,7 +58,8 @@ type Window struct {
 	chatArea         *tview.Flex
 	chatView         *ChatView
 	messageContainer tview.Primitive
-	messageInput     *Editor
+	messageInput     *femto.View
+	messageBuffer    *femto.Buffer
 
 	editingMessageID *string
 	messageLoader    *discordutil.MessageLoader
@@ -313,8 +316,8 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		}
 
 		if shortcuts.ReplySelectedMessage.Equals(event) {
-			window.messageInput.SetText("@" + message.Author.Username + "#" + message.Author.Discriminator + " " + window.messageInput.GetText())
-			app.SetFocus(window.messageInput.GetPrimitive())
+			window.setMessageText("@" + message.Author.Username + "#" + message.Author.Discriminator + " " + window.messageBuffer.String())
+			app.SetFocus(window.messageInput)
 			return nil
 		}
 
@@ -350,16 +353,18 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	})
 	window.messageContainer = window.chatView.GetPrimitive()
 
-	window.messageInput = NewEditor()
-	window.messageInput.internalTextView.SetIndicateOverflow(true)
-	window.messageInput.SetOnHeightChangeRequest(func(height int) {
-		_, _, _, chatViewHeight := window.chatView.internalTextView.GetRect()
-		newHeight := maths.Min(height, chatViewHeight/2)
+	window.messageBuffer = femto.NewBufferFromString("", "dummypath.txt")
+	window.messageBuffer.Settings["ruler"] = false
+	window.messageBuffer.Settings["softwrap"] = true
+	window.messageBuffer.Settings["filetype"] = "markdown"
+	window.messageInput = femto.NewView(window.messageBuffer)
+	window.messageInput.SetBorder(true)
+	window.messageInput.SetRuntimeFiles(runtime.Files)
 
-		window.chatArea.ResizeItem(window.messageInput.GetPrimitive(), newHeight, 0)
-	})
+	window.messageInput.SetIndicateOverflow(true)
 
-	window.messageInput.SetMentionShowHandler(func(namePart string) {
+	//Editor-todo
+	/*window.messageInput.SetMentionShowHandler(func(namePart string) {
 		mentionWindow.GetRoot().ClearChildren()
 		window.commandView.commandOutput.Clear()
 
@@ -367,14 +372,10 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		if !window.ShowMentionWindowChildren(mentionWindow, 10) {
 			window.HideMentionWindow(mentionWindow)
 		}
-	})
-
-	window.messageInput.SetMentionHideHandler(func() {
-		window.HideMentionWindow(mentionWindow)
-	})
+	})*/
 
 	window.messageInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		messageToSend := window.messageInput.GetText()
+		messageToSend := window.messageBuffer.String()
 
 		if event.Modifiers() == tcell.ModAlt {
 			if event.Key() == tcell.KeyUp {
@@ -453,6 +454,11 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 			return nil
 		}
 
+		if shortcuts.InputNewLine.Equals(event) {
+			window.messageInput.InsertNewline()
+			return nil
+		}
+
 		if event.Key() == tcell.KeyEsc {
 			window.exitMessageEditMode()
 			return nil
@@ -468,12 +474,12 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 			if clipError == nil {
 				dataChannel := bytes.NewReader(data)
 				targetChannel := window.selectedChannel
-				currentText := window.prepareMessage(targetChannel, strings.TrimSpace(window.messageInput.GetText()))
+				currentText := window.prepareMessage(targetChannel, strings.TrimSpace(window.messageBuffer.String()))
 				if currentText == "" {
 					go window.session.ChannelFileSend(targetChannel.ID, "img.png", dataChannel)
 				} else {
 					go window.session.ChannelFileSendWithMessage(targetChannel.ID, currentText, "img.png", dataChannel)
-					window.messageInput.SetText("")
+					window.messageBuffer.Replace(window.messageBuffer.Start(), window.messageBuffer.End(), "")
 				}
 			} else {
 				window.ShowErrorDialog(fmt.Sprintf("Error pasting image: %s", clipError.Error()))
@@ -483,7 +489,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		}
 
 		if shortcuts.AddNewLineInCodeBlock.Equals(event) && window.IsCursorInsideCodeBlock() {
-			window.insertNewLineAtCursor()
+			//window.insertNewLineAtCursor()
 			return nil
 		} else if shortcuts.SendMessage.Equals(event) {
 			if window.selectedChannel != nil {
@@ -512,15 +518,15 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		window.privateList.internalTreeView.SetSearchOnTypeEnabled(true)
 	} else if config.GetConfig().OnTypeInListBehaviour == config.FocusMessageInputOnTypeInList {
 		guildList.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
+			window.app, window.messageInput))
 		channelTree.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
+			window.app, window.messageInput))
 		window.userList.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
+			window.app, window.messageInput))
 		window.privateList.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
+			window.app, window.messageInput))
 		window.chatView.internalTextView.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
+			window.app, window.messageInput))
 	}
 
 	//Guild Container arrow key navigation. Please end my life.
@@ -579,7 +585,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 					if window.commandMode {
 						window.app.SetFocus(window.commandView.commandOutput)
 					} else {
-						window.app.SetFocus(window.messageInput.GetPrimitive())
+						window.app.SetFocus(window.messageInput)
 					}
 				}
 				return nil
@@ -589,7 +595,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 				if window.commandMode {
 					window.app.SetFocus(window.commandView.commandOutput)
 				} else {
-					window.app.SetFocus(window.messageInput.GetPrimitive())
+					window.app.SetFocus(window.messageInput)
 				}
 				return nil
 			}
@@ -616,7 +622,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	newChatViewHandler := func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Modifiers() == tcell.ModAlt {
 			if event.Key() == tcell.KeyDown {
-				window.app.SetFocus(window.messageInput.GetPrimitive())
+				window.app.SetFocus(window.messageInput)
 				return nil
 			}
 
@@ -624,7 +630,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 				if window.commandMode {
 					window.app.SetFocus(window.commandView.commandInput.internalTextView)
 				} else {
-					window.app.SetFocus(window.messageInput.GetPrimitive())
+					window.app.SetFocus(window.messageInput)
 				}
 				return nil
 			}
@@ -791,7 +797,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	window.commandView.SetInputCaptureForOutput(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Modifiers() == tcell.ModAlt {
 			if event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.messageInput.GetPrimitive())
+				window.app.SetFocus(window.messageInput)
 			} else if event.Key() == tcell.KeyDown {
 				window.app.SetFocus(window.commandView.commandInput.GetPrimitive())
 			} else if event.Key() == tcell.KeyRight {
@@ -854,49 +860,15 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	mentionWindow.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch key := event.Key(); key {
 		case tcell.KeyRune, tcell.KeyDelete, tcell.KeyBackspace, tcell.KeyBackspace2, tcell.KeyLeft, tcell.KeyRight, tcell.KeyCtrlA, tcell.KeyCtrlV:
-			window.messageInput.internalTextView.GetInputCapture()(event)
+			window.messageInput.GetInputCapture()(event)
 			return nil
 		}
 		return event
 	})
 
-	// Invoked when enter is pressed
-	mentionWindow.SetSelectedFunc(func(node *tview.TreeNode) {
-		beginIndex, endIndex := window.messageInput.GetCurrentMentionIndices()
-		data, ok := node.GetReference().(string)
-		oldText := window.messageInput.GetText()
-		if ok {
-			left := oldText[:beginIndex] + strings.TrimSpace(data) + " "
-			right := oldText[endIndex+1:]
-			var text string
-			if len(right) == 0 {
-				text = left + " "
-			} else {
-				text = left + right
-			}
-			window.messageInput.SetText(text)
-			window.messageInput.MoveCursorToIndex(text, len(left))
-		} else {
-			role, ok := node.GetReference().(*discordgo.Role)
-			if ok {
-				left := "<@&" + strings.TrimSpace(role.ID) + "> "
-				right := oldText[endIndex+1:]
-				var text string
-				if len(right) == 0 {
-					text = left + " "
-				} else {
-					text = left + right
-				}
-				window.messageInput.SetText(text)
-				window.messageInput.MoveCursorToIndex(text, len(left))
-			}
-		}
-		window.messageInput.mentionHideHandler()
-	})
-
 	window.chatArea.AddItem(window.messageContainer, 0, 1, false)
 	window.chatArea.AddItem(mentionWindow, 2, 2, true)
-	window.chatArea.AddItem(window.messageInput.GetPrimitive(), window.messageInput.GetRequestedHeight(), 0, false)
+	window.chatArea.AddItem(window.messageInput, 10, 0, false)
 
 	window.commandView.commandOutput.SetVisible(false)
 	window.commandView.commandInput.internalTextView.SetVisible(false)
@@ -956,21 +928,8 @@ func (window *Window) loadPrivateChannel(channel *discordgo.Channel) {
 	window.RefreshLayout()
 }
 
-func (window *Window) insertNewLineAtCursor() {
-	left := window.messageInput.internalTextView.GetRegionText("left")
-	right := window.messageInput.internalTextView.GetRegionText("right")
-	selection := window.messageInput.internalTextView.GetRegionText("selection")
-	window.messageInput.InsertCharacter([]rune(left), []rune(right), []rune(selection), '\n')
-	window.app.QueueUpdateDraw(func() {
-		window.messageInput.triggerHeightRequestIfNeccessary()
-		window.messageInput.internalTextView.ScrollToHighlight()
-	})
-}
-
 func (window *Window) IsCursorInsideCodeBlock() bool {
-	left := window.messageInput.internalTextView.GetRegionText("left")
-	leftSplit := strings.Split(left, "```")
-	return len(leftSplit)%2 == 0
+	return false
 }
 
 func (window *Window) insertQuoteOfMessage(message *discordgo.Message) {
@@ -987,13 +946,17 @@ func (window *Window) insertQuoteOfMessage(message *discordgo.Message) {
 		}
 	}
 
-	quotedMessage, generateError := discordutil.GenerateQuote(message.ContentWithMentionsReplaced(), username, message.Timestamp, window.messageInput.GetText())
+	quotedMessage, generateError := discordutil.GenerateQuote(message.ContentWithMentionsReplaced(), username, message.Timestamp, window.messageBuffer.String())
 	if generateError == nil {
-		window.messageInput.SetText(quotedMessage)
-		window.app.SetFocus(window.messageInput.GetPrimitive())
+		window.setMessageText(quotedMessage)
+		window.app.SetFocus(window.messageInput)
 	} else {
 		window.ShowErrorDialog(fmt.Sprintf("Error quoting message:\n\t%s", generateError.Error()))
 	}
+}
+
+func (window *Window) setMessageText(text string) {
+	window.messageBuffer.Replace(window.messageBuffer.Start(), window.messageBuffer.End(), text)
 }
 
 func (window *Window) TrySendMessage(targetChannel *discordgo.Channel, message string) {
@@ -1012,7 +975,7 @@ func (window *Window) TrySendMessage(targetChannel *discordgo.Channel, message s
 	message = strings.TrimSpace(message)
 	if len(message) == 0 {
 		window.app.QueueUpdateDraw(func() {
-			window.messageInput.SetText("")
+			window.setMessageText("")
 		})
 		return
 	}
@@ -1025,7 +988,7 @@ func (window *Window) TrySendMessage(targetChannel *discordgo.Channel, message s
 			window.ShowDialog(config.GetTheme().PrimitiveBackgroundColor, fmt.Sprintf("Your message is %d characters too long, what do you want to do?", overlength),
 				func(button string) {
 					if button == sendAsFile {
-						window.messageInput.SetText("")
+						window.setMessageText("")
 						go window.sendMessageAsFile(message, targetChannel.ID)
 					}
 				}, sendAsFile, "Nothing")
@@ -1053,7 +1016,7 @@ func (window *Window) sendMessageAsFile(message string, channel string) {
 					case retry:
 						go window.sendMessageAsFile(channel, message)
 					case edit:
-						window.messageInput.SetText(message)
+						window.setMessageText(message)
 					}
 				}, retry, edit, "Cancel")
 		})
@@ -1062,7 +1025,7 @@ func (window *Window) sendMessageAsFile(message string, channel string) {
 
 func (window *Window) sendMessage(targetChannelID, message string) {
 	window.app.QueueUpdateDraw(func() {
-		window.messageInput.SetText("")
+		window.setMessageText("")
 		window.chatView.internalTextView.ScrollToEnd()
 	})
 	_, sendError := window.session.ChannelMessageSend(targetChannelID, message)
@@ -1078,7 +1041,7 @@ func (window *Window) sendMessage(targetChannelID, message string) {
 					case retry:
 						go window.sendMessage(targetChannelID, message)
 					case edit:
-						window.messageInput.SetText(message)
+						window.setMessageText(message)
 					}
 				}, retry, edit, cancel)
 		})
@@ -1087,7 +1050,7 @@ func (window *Window) sendMessage(targetChannelID, message string) {
 
 func (window *Window) HideMentionWindow(mentionWindow *tview.TreeView) {
 	mentionWindow.SetVisible(false)
-	window.app.SetFocus(window.messageInput.internalTextView)
+	window.app.SetFocus(window.messageInput)
 }
 
 func (window *Window) ShowMentionWindowChildren(mentionWindow *tview.TreeView, maxChildren int) bool {
@@ -1469,9 +1432,9 @@ func (window *Window) registerMouseFocusListeners() {
 		return false
 	})
 
-	window.messageInput.internalTextView.SetMouseHandler(func(event *tcell.EventMouse) bool {
+	window.messageInput.SetMouseHandler(func(event *tcell.EventMouse) bool {
 		if event.Buttons() == tcell.Button1 {
-			window.app.SetFocus(window.messageInput.internalTextView)
+			window.app.SetFocus(window.messageInput)
 
 			return true
 		}
@@ -1999,7 +1962,7 @@ func (window *Window) handleGlobalShortcuts(event *tcell.EventKey) *tcell.EventK
 		if window.commandMode {
 			window.app.SetFocus(window.commandView.commandInput.internalTextView)
 		} else {
-			window.app.SetFocus(window.messageInput.GetPrimitive())
+			window.app.SetFocus(window.messageInput)
 		}
 	} else if shortcuts.FocusCommandOutput.Equals(event) {
 		if !window.commandMode {
@@ -2018,7 +1981,7 @@ func (window *Window) handleGlobalShortcuts(event *tcell.EventKey) *tcell.EventK
 		conf.ShowUserContainer = !conf.ShowUserContainer
 
 		if !conf.ShowUserContainer && window.app.GetFocus() == window.userList.internalTreeView {
-			window.app.SetFocus(window.messageInput.GetPrimitive())
+			window.app.SetFocus(window.messageInput)
 		}
 
 		config.PersistConfig()
@@ -2044,7 +2007,7 @@ func (window *Window) handleGlobalShortcuts(event *tcell.EventKey) *tcell.EventK
 			window.app.SetFocus(window.userList.internalTreeView)
 		}
 	} else if shortcuts.FocusMessageInput.Equals(event) {
-		window.app.SetFocus(window.messageInput.GetPrimitive())
+		window.app.SetFocus(window.messageInput)
 	} else {
 		return event
 	}
@@ -2166,17 +2129,17 @@ func (window *Window) ShowTFASetup() {
 
 func (window *Window) startEditingMessage(message *discordgo.Message) {
 	if message.Author.ID == window.session.State.User.ID {
-		window.messageInput.SetText(message.Content)
+		window.setMessageText(message.Content)
 		window.messageInput.SetBorderColor(tcell.ColorYellow)
 		window.messageInput.SetBorderFocusColor(tcell.ColorYellow)
 		window.editingMessageID = &message.ID
-		window.app.SetFocus(window.messageInput.GetPrimitive())
+		window.app.SetFocus(window.messageInput)
 	}
 }
 
 func (window *Window) exitMessageEditMode() {
 	window.exitMessageEditModeAndKeepText()
-	window.messageInput.SetText("")
+	window.setMessageText("")
 }
 
 func (window *Window) exitMessageEditModeAndKeepText() {
@@ -2195,7 +2158,7 @@ func (window *Window) editMessage(channelID, messageID, messageEdited string) {
 	go func() {
 		window.app.QueueUpdateDraw(func() {
 			window.exitMessageEditMode()
-			window.messageInput.SetText("")
+			window.setMessageText("")
 		})
 		_, discordError := window.session.ChannelMessageEdit(channelID, messageID, messageEdited)
 		window.app.QueueUpdateDraw(func() {
@@ -2210,7 +2173,7 @@ func (window *Window) editMessage(channelID, messageID, messageEdited string) {
 						case retry:
 							window.editMessage(channelID, messageID, messageEdited)
 						case edit:
-							window.messageInput.SetText(messageEdited)
+							window.setMessageText(messageEdited)
 						}
 					}, retry, edit, cancel)
 			}
@@ -2280,7 +2243,7 @@ func (window *Window) SwitchToPreviousChannel() error {
 	default:
 		return fmt.Errorf("Invalid channel type: %v", window.previousChannel.Type)
 	}
-	window.app.SetFocus(window.messageInput.internalTextView)
+	window.app.SetFocus(window.messageInput)
 	return nil
 }
 
@@ -2362,7 +2325,7 @@ func (window *Window) LoadChannel(channel *discordgo.Channel) error {
 	window.exitMessageEditModeAndKeepText()
 
 	if config.GetConfig().FocusMessageInputAfterChannelSelection {
-		window.app.SetFocus(window.messageInput.internalTextView)
+		window.app.SetFocus(window.messageInput)
 	}
 
 	go func() {
