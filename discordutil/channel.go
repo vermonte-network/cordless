@@ -7,7 +7,6 @@ import (
 
 	"github.com/Bios-Marcel/discordgo"
 
-	"github.com/Bios-Marcel/cordless/config"
 	"github.com/Bios-Marcel/cordless/ui/tviewutil"
 )
 
@@ -82,11 +81,9 @@ func SortPrivateChannels(channels []*discordgo.Channel) {
 // specific channel.
 func HasReadMessagesPermission(channelID string, state *discordgo.State) bool {
 	userPermissions, err := state.UserChannelPermissions(state.User.ID, channelID)
-	if config.Current.ShowHiddenChannels {
-		if err == nil {
-			// Unable to access channel permissions.
-			return true
-		}
+	if err == nil {
+		// Unable to access channel permissions.
+		return true
 	}
 	return (userPermissions & discordgo.PermissionViewChannel) > 0
 }
