@@ -646,37 +646,24 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	captureFunc := func(event *tcell.EventKey) *tcell.EventKey {
 		messageToSend := window.messageInput.GetText()
 
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyUp {
+		if shortcuts.FocusUp.Equals(event) {
+			window.app.SetFocus(window.chatView.internalTextView)
+			return nil
+		}
+
+		if shortcuts.FocusDown.Equals(event) {
+			if window.commandMode {
+				window.app.SetFocus(window.commandView.commandOutput)
+			} else {
 				window.app.SetFocus(window.chatView.internalTextView)
-				return nil
 			}
+			return nil
+		}
 
-			if event.Key() == tcell.KeyDown {
-				if window.commandMode {
-					window.app.SetFocus(window.commandView.commandOutput)
-				} else {
-					window.app.SetFocus(window.chatView.internalTextView)
-				}
-				return nil
-			}
-
-			if event.Key() == tcell.KeyRight {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					if window.activeView == Guilds {
-						window.app.SetFocus(window.channelTree)
-						return nil
-					} else if window.activeView == Dms {
-						window.app.SetFocus(window.privateList.internalTreeView)
-						return nil
-					}
-				}
-				return nil
-			}
-
-			if event.Key() == tcell.KeyLeft {
+		if shortcuts.FocusRight.Equals(event) {
+			if window.userList.internalTreeView.IsVisible() {
+				window.app.SetFocus(window.userList.internalTreeView)
+			} else {
 				if window.activeView == Guilds {
 					window.app.SetFocus(window.channelTree)
 					return nil
@@ -684,6 +671,17 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 					window.app.SetFocus(window.privateList.internalTreeView)
 					return nil
 				}
+			}
+			return nil
+		}
+
+		if shortcuts.FocusLeft.Equals(event) {
+			if window.activeView == Guilds {
+				window.app.SetFocus(window.channelTree)
+				return nil
+			} else if window.activeView == Dms {
+				window.app.SetFocus(window.privateList.internalTreeView)
+				return nil
 			}
 		}
 
@@ -839,25 +837,23 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	//Guild Container arrow key navigation. Please end my life.
 	oldGuildListHandler := guildList.GetInputCapture()
 	newGuildHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyDown || event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.channelTree)
-				return nil
-			}
+		if shortcuts.FocusUp.Equals(event) || shortcuts.FocusDown.Equals(event) {
+			window.app.SetFocus(window.channelTree)
+			return nil
+		}
 
-			if event.Key() == tcell.KeyLeft {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					window.app.SetFocus(window.chatView.internalTextView)
-				}
-				return nil
-			}
-
-			if event.Key() == tcell.KeyRight {
+		if shortcuts.FocusLeft.Equals(event) {
+			if window.userList.internalTreeView.IsVisible() {
+				window.app.SetFocus(window.userList.internalTreeView)
+			} else {
 				window.app.SetFocus(window.chatView.internalTextView)
-				return nil
 			}
+			return nil
+		}
+
+		if shortcuts.FocusRight.Equals(event) {
+			window.app.SetFocus(window.chatView.internalTextView)
+			return nil
 		}
 
 		return event
@@ -879,33 +875,32 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	//Channel Container arrow key navigation. Please end my life.
 	oldChannelListHandler := channelTree.GetInputCapture()
 	newChannelListHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyDown || event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.guildList)
-				return nil
-			}
 
-			if event.Key() == tcell.KeyLeft {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					if window.commandMode {
-						window.app.SetFocus(window.commandView.commandOutput)
-					} else {
-						window.app.SetFocus(window.messageInput.GetPrimitive())
-					}
-				}
-				return nil
-			}
+		if shortcuts.FocusUp.Equals(event) || shortcuts.FocusDown.Equals(event) {
+			window.app.SetFocus(window.guildList)
+			return nil
+		}
 
-			if event.Key() == tcell.KeyRight {
+		if shortcuts.FocusLeft.Equals(event) {
+			if window.userList.internalTreeView.IsVisible() {
+				window.app.SetFocus(window.userList.internalTreeView)
+			} else {
 				if window.commandMode {
 					window.app.SetFocus(window.commandView.commandOutput)
 				} else {
 					window.app.SetFocus(window.messageInput.GetPrimitive())
 				}
-				return nil
 			}
+			return nil
+		}
+
+		if shortcuts.FocusRight.Equals(event) {
+			if window.commandMode {
+				window.app.SetFocus(window.commandView.commandOutput)
+			} else {
+				window.app.SetFocus(window.messageInput.GetPrimitive())
+			}
+			return nil
 		}
 
 		return event
@@ -927,22 +922,34 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	//Chatview arrow key navigation. Please end my life.
 	oldChatViewHandler := window.chatView.internalTextView.GetInputCapture()
 	newChatViewHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyDown {
+		if shortcuts.FocusDown.Equals(event) {
+			window.app.SetFocus(window.messageInput.GetPrimitive())
+			return nil
+		}
+
+		if shortcuts.FocusUp.Equals(event) {
+			if window.commandMode {
+				window.app.SetFocus(window.commandView.commandInput.internalTextView)
+			} else {
 				window.app.SetFocus(window.messageInput.GetPrimitive())
+			}
+			return nil
+		}
+
+		if shortcuts.FocusLeft.Equals(event) {
+			if window.activeView == Guilds {
+				window.app.SetFocus(window.guildList)
+				return nil
+			} else if window.activeView == Guilds {
+				window.app.SetFocus(window.privateList.internalTreeView)
 				return nil
 			}
+		}
 
-			if event.Key() == tcell.KeyUp {
-				if window.commandMode {
-					window.app.SetFocus(window.commandView.commandInput.internalTextView)
-				} else {
-					window.app.SetFocus(window.messageInput.GetPrimitive())
-				}
-				return nil
-			}
-
-			if event.Key() == tcell.KeyLeft {
+		if shortcuts.FocusRight.Equals(event) {
+			if window.userList.internalTreeView.IsVisible() {
+				window.app.SetFocus(window.userList.internalTreeView)
+			} else {
 				if window.activeView == Guilds {
 					window.app.SetFocus(window.guildList)
 					return nil
@@ -951,21 +958,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 					return nil
 				}
 			}
-
-			if event.Key() == tcell.KeyRight {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					if window.activeView == Guilds {
-						window.app.SetFocus(window.guildList)
-						return nil
-					} else if window.activeView == Guilds {
-						window.app.SetFocus(window.privateList.internalTreeView)
-						return nil
-					}
-				}
-				return nil
-			}
+			return nil
 		}
 
 		return event
@@ -987,21 +980,19 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	//User Container arrow key navigation. Please end my life.
 	oldUserListHandler := window.userList.internalTreeView.GetInputCapture()
 	newUserListHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyRight {
-				if window.activeView == Guilds {
-					window.app.SetFocus(window.guildList)
-					return nil
-				} else if window.activeView == Guilds {
-					window.app.SetFocus(window.privateList.internalTreeView)
-					return nil
-				}
+		if shortcuts.FocusRight.Equals(event) {
+			if window.activeView == Guilds {
+				window.app.SetFocus(window.guildList)
+				return nil
+			} else if window.activeView == Guilds {
+				window.app.SetFocus(window.privateList.internalTreeView)
 				return nil
 			}
-			if event.Key() == tcell.KeyLeft {
-				window.app.SetFocus(window.chatView.GetPrimitive())
-				return nil
-			}
+			return nil
+		}
+		if shortcuts.FocusLeft.Equals(event) {
+			window.app.SetFocus(window.chatView.GetPrimitive())
+			return nil
 		}
 
 		return event
@@ -1023,20 +1014,18 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	//Private Container arrow key navigation. Please end my life.
 	oldPrivateListHandler := window.privateList.internalTreeView.GetInputCapture()
 	newPrivateListHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyLeft {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					window.app.SetFocus(window.chatView.internalTextView)
-				}
-				return nil
-			}
-
-			if event.Key() == tcell.KeyRight {
+		if shortcuts.FocusLeft.Equals(event) {
+			if window.userList.internalTreeView.IsVisible() {
+				window.app.SetFocus(window.userList.internalTreeView)
+			} else {
 				window.app.SetFocus(window.chatView.internalTextView)
-				return nil
 			}
+			return nil
+		}
+
+		if shortcuts.FocusRight.Equals(event) {
+			window.app.SetFocus(window.chatView.internalTextView)
+			return nil
 		}
 
 		return event
@@ -1078,48 +1067,36 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	})
 
 	window.commandView.SetInputCaptureForInput(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.commandView.commandOutput)
-			} else if event.Key() == tcell.KeyDown {
-				window.app.SetFocus(window.chatView.GetPrimitive())
-			} else if event.Key() == tcell.KeyRight {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					window.app.SetFocus(window.channelTree)
-				}
-			} else if event.Key() == tcell.KeyLeft {
-				window.app.SetFocus(window.channelTree)
+		if shortcuts.FocusUp.Equals(event) {
+			window.app.SetFocus(window.commandView.commandOutput)
+		} else if shortcuts.FocusDown.Equals(event) {
+			window.app.SetFocus(window.chatView.GetPrimitive())
+		} else if shortcuts.FocusRight.Equals(event) {
+			if window.userList.internalTreeView.IsVisible() {
+				window.app.SetFocus(window.userList.internalTreeView)
 			} else {
-				return event
+				window.app.SetFocus(window.channelTree)
 			}
-
-			return nil
+		} else if shortcuts.FocusLeft.Equals(event) {
+			window.app.SetFocus(window.channelTree)
 		}
 
 		return event
 	})
 
 	window.commandView.SetInputCaptureForOutput(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.messageInput.GetPrimitive())
-			} else if event.Key() == tcell.KeyDown {
-				window.app.SetFocus(window.commandView.commandInput.GetPrimitive())
-			} else if event.Key() == tcell.KeyRight {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					window.app.SetFocus(window.channelTree)
-				}
-			} else if event.Key() == tcell.KeyLeft {
-				window.app.SetFocus(window.channelTree)
+		if shortcuts.FocusUp.Equals(event) {
+			window.app.SetFocus(window.messageInput.GetPrimitive())
+		} else if shortcuts.FocusDown.Equals(event) {
+			window.app.SetFocus(window.commandView.commandInput.GetPrimitive())
+		} else if shortcuts.FocusRight.Equals(event) {
+			if window.userList.internalTreeView.IsVisible() {
+				window.app.SetFocus(window.userList.internalTreeView)
 			} else {
-				return event
+				window.app.SetFocus(window.channelTree)
 			}
-
-			return nil
+		} else if shortcuts.FocusLeft.Equals(event) {
+			window.app.SetFocus(window.channelTree)
 		}
 
 		return event
@@ -1148,7 +1125,9 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	window.rootContainer.AddItem(window.dialogReplacement, 2, 0, false)
 
 	if config.Current.ShowBottomBar {
-		bottomBar := NewBottomBar(session.State.User.Username)
+		bottomBar := NewBottomBar()
+		bottomBar.AddItem(fmt.Sprintf("Logged in as: '%s'", tviewutil.Escape(session.State.User.Username)))
+		bottomBar.AddItem(fmt.Sprintf("View / Change shortcuts: %s", shortcutdialog.EventToString(shortcutsDialogShortcut)))
 		window.rootContainer.AddItem(bottomBar, 1, 0, false)
 	}
 
@@ -1203,6 +1182,14 @@ Welcome to version %s of Cordless. Below you can see the most
 important changes of the last two versions officially released.
 
 [::b]THIS VERSION
+	- Features
+	- Changes
+		- There's now a double-colon to separate author and messages
+	- Bugfixes
+		- Messages containing links won't disappear anymore after sending
+		- Messages from blocked users won't trigger notifications anymore
+		- No more spammed empty error messages when receiving notifications
+[::b]2020-08-30
 	- Features
 		- Nicknames can now be disabled via the configuration
 		- Files from messages can now be downloaded (key d) or opened (key o)
@@ -1855,47 +1842,14 @@ func (window *Window) startMessageHandlerRoutines(input, edit, delete chan *disc
 				continue
 			}
 
-			isCurrentChannel := window.selectedChannel == nil || message.ChannelID != window.selectedChannel.ID
-			mentionsCurrentUser := discordutil.MentionsCurrentUserExplicitly(window.session.State, message)
-			if config.Current.DesktopNotifications &&
-				(mentionsCurrentUser ||
-					//Always show notification for private messages
-					channel.Type == discordgo.ChannelTypeDM || channel.Type == discordgo.ChannelTypeGroupDM) &&
-				(!isCurrentChannel ||
-					(config.Current.DesktopNotificationsForLoadedChannel && !window.userActive)) {
-
-				var notificationLocation string
-				if channel.Type == discordgo.ChannelTypeDM {
-					notificationLocation = message.Author.Username
-				} else if channel.Type == discordgo.ChannelTypeGroupDM {
-					notificationLocation = channel.Name
-					if notificationLocation == "" {
-						for index, recipient := range channel.Recipients {
-							if index == 0 {
-								notificationLocation = recipient.Username
-							} else {
-								notificationLocation = fmt.Sprintf("%s, %s", notificationLocation, recipient.Username)
-							}
-						}
-					}
-
-					notificationLocation = message.Author.Username + " - " + notificationLocation
-				} else if channel.Type == discordgo.ChannelTypeGuildText {
-					guild, cacheError := window.session.State.Guild(message.GuildID)
-					if guild != nil && cacheError == nil {
-						notificationLocation = fmt.Sprintf("%s - %s - %s", guild.Name, channel.Name, message.Author.Username)
-					} else {
-						notificationLocation = fmt.Sprintf("%s - %s", message.Author.Username, channel.Name)
-					}
-				}
-
-				notifyError := beeep.Notify("Cordless - "+notificationLocation, message.ContentWithMentionsReplaced(), "assets/information.png")
+			if config.Current.DesktopNotifications {
+				notifyError := window.handleNotification(message, channel)
 				if notifyError != nil {
 					log.Printf("["+tviewutil.ColorToHex(config.GetTheme().ErrorColor)+"]Error sending notification:\n\t[%s]%s\n", tviewutil.ColorToHex(config.GetTheme().ErrorColor), notifyError)
 				}
 			}
 
-			if isCurrentChannel {
+			if window.selectedChannel == nil || message.ChannelID != window.selectedChannel.ID {
 				if channel.Type == discordgo.ChannelTypeDM || channel.Type == discordgo.ChannelTypeGroupDM {
 					if !readstate.IsPrivateChannelMuted(channel) {
 						window.app.QueueUpdateDraw(func() {
@@ -1903,7 +1857,7 @@ func (window *Window) startMessageHandlerRoutines(input, edit, delete chan *disc
 						})
 					}
 				} else if channel.Type == discordgo.ChannelTypeGuildText {
-					if mentionsCurrentUser {
+					if discordutil.MentionsCurrentUserExplicitly(window.session.State, message) {
 						window.app.QueueUpdateDraw(func() {
 							window.channelTree.MarkChannelAsMentioned(channel.ID)
 						})
@@ -2213,6 +2167,61 @@ func (window *Window) registerGuildChannelHandler() {
 			})
 		}
 	})
+}
+
+func (window *Window) isElligibleForNotification(message *discordgo.Message, channel *discordgo.Channel) bool {
+	if discordutil.IsBlocked(window.session.State, message.Author) {
+		return false
+	}
+
+	isCurrentChannel := window.selectedChannel == nil || message.ChannelID != window.selectedChannel.ID
+	//Client is not in a state elligible for notifications.
+	if isCurrentChannel && (window.userActive || !config.Current.DesktopNotificationsForLoadedChannel) {
+		return false
+	}
+
+	isPrivateChannel := channel.Type == discordgo.ChannelTypeDM || channel.Type == discordgo.ChannelTypeGroupDM
+	mentionsCurrentUser := discordutil.MentionsCurrentUserExplicitly(window.session.State, message)
+	//We always show notification for private messages, no matter whether
+	//the user was explicitly mentioned.
+	if !isPrivateChannel && !mentionsCurrentUser {
+		return false
+	}
+
+	return true
+}
+
+func (window *Window) handleNotification(message *discordgo.Message, channel *discordgo.Channel) error {
+	if !window.isElligibleForNotification(message, channel) {
+		return nil
+	}
+
+	var notificationLocation string
+	if channel.Type == discordgo.ChannelTypeDM {
+		notificationLocation = message.Author.Username
+	} else if channel.Type == discordgo.ChannelTypeGroupDM {
+		notificationLocation = channel.Name
+		if notificationLocation == "" {
+			for index, recipient := range channel.Recipients {
+				if index == 0 {
+					notificationLocation = recipient.Username
+				} else {
+					notificationLocation = fmt.Sprintf("%s, %s", notificationLocation, recipient.Username)
+				}
+			}
+		}
+
+		notificationLocation = message.Author.Username + " - " + notificationLocation
+	} else if channel.Type == discordgo.ChannelTypeGuildText {
+		guild, cacheError := window.session.State.Guild(message.GuildID)
+		if guild != nil && cacheError == nil {
+			notificationLocation = fmt.Sprintf("%s - %s - %s", guild.Name, channel.Name, message.Author.Username)
+		} else {
+			notificationLocation = fmt.Sprintf("%s - %s", message.Author.Username, channel.Name)
+		}
+	}
+
+	return beeep.Notify("Cordless - "+notificationLocation, message.ContentWithMentionsReplaced(), "assets/information.png")
 }
 
 func (window *Window) askForMessageDeletion(messageID string, usedWithSelection bool) {
