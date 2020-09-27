@@ -12,6 +12,7 @@ import (
 
 var (
 	data           = make(map[string]uint64)
+	mentions       = make(map[string]bool)
 	readStateMutex = &sync.Mutex{}
 	timerMutex     = &sync.Mutex{}
 	ackTimers      = make(map[string]*time.Timer)
@@ -37,6 +38,10 @@ func Load(sessionState *discordgo.State) {
 		}
 
 		data[channelState.ID] = parsed
+
+		if channelState.MentionCount > 0 {
+			mentions[channelState.ID] = true
+		}
 	}
 
 }
@@ -57,13 +62,15 @@ func ClearReadStateFor(channelID string) {
 // anything to the Discord API. The update will only be applied if the new
 // message ID is greater than the old one.
 func UpdateReadLocal(channelID string, lastMessageID string) bool {
+	readStateMutex.Lock()
+	defer readStateMutex.Unlock()
+
+	delete(mentions, channelID)
+
 	parsed, parseError := strconv.ParseUint(lastMessageID, 10, 64)
 	if parseError != nil {
 		return false
 	}
-
-	readStateMutex.Lock()
-	defer readStateMutex.Unlock()
 
 	old, isPresent := data[channelID]
 	if !isPresent || old < parsed {
@@ -80,6 +87,8 @@ func UpdateReadLocal(channelID string, lastMessageID string) bool {
 func UpdateRead(session *discordgo.Session, channel *discordgo.Channel, lastMessageID string) error {
 	readStateMutex.Lock()
 	defer readStateMutex.Unlock()
+
+	delete(mentions, channel.ID)
 
 	// Avoid unnecessary traffic
 	if hasBeenReadWithoutLocking(channel, lastMessageID) {
@@ -159,6 +168,28 @@ func HasGuildBeenRead(guildID string) bool {
 	return true
 }
 
+// HasGuildBeenMentioned checks whether any channel in the guild mentioned
+// the currently logged in user.
+func HasGuildBeenMentioned(guildID string) bool {
+	if IsGuildMuted(guildID) {
+		return false
+	}
+
+	realGuild, cacheError := state.Guild(guildID)
+	if cacheError == nil {
+		readStateMutex.Lock()
+		defer readStateMutex.Unlock()
+
+		for _, channel := range realGuild.Channels {
+			if hasBeenMentionedWithoutLocking(channel.ID) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func isChannelMuted(channel *discordgo.Channel) bool {
 	//optimization for the case of guild channels, as the handling for
 	//private channels will be unnecessarily slower.
@@ -171,10 +202,23 @@ func isChannelMuted(channel *discordgo.Channel) bool {
 
 // IsGuildChannelMuted checks whether a guild channel has been set to silent.
 func IsGuildChannelMuted(channel *discordgo.Channel) bool {
+	if isGuildChannelMuted(channel.GuildID, channel.ID) {
+		return true
+	}
+
+	//Check if Parent (CATEGORY) is muted
+	if channel.ParentID != "" && isGuildChannelMuted(channel.GuildID, channel.ParentID) {
+		return true
+	}
+
+	return false
+}
+
+func isGuildChannelMuted(guildID, channelID string) bool {
 	for _, settings := range state.UserGuildSettings {
-		if settings.GetGuildID() == channel.GuildID {
+		if settings.GetGuildID() == guildID {
 			for _, override := range settings.ChannelOverrides {
-				if override.ChannelID == channel.ID {
+				if override.ChannelID == channelID {
 					if override.Muted {
 						return true
 					}
@@ -222,6 +266,28 @@ func HasBeenRead(channel *discordgo.Channel, lastMessageID string) bool {
 	defer readStateMutex.Unlock()
 
 	return hasBeenReadWithoutLocking(channel, lastMessageID)
+}
+
+// HasBeenMentioned checks whether the currently logged in user has been
+// mentioned in this channel.
+func HasBeenMentioned(channelID string) bool {
+	readStateMutex.Lock()
+	defer readStateMutex.Unlock()
+
+	return hasBeenMentionedWithoutLocking(channelID)
+}
+
+func hasBeenMentionedWithoutLocking(channelID string) bool {
+	mentioned, ok := mentions[channelID]
+	return ok && mentioned
+}
+
+// MarkAsMentioned sets the given channel ID to mentioned.
+func MarkAsMentioned(channelID string) {
+	readStateMutex.Lock()
+	defer readStateMutex.Unlock()
+
+	mentions[channelID] = true
 }
 
 // hasBeenReadWithoutLocking checks whether the passed channel has an unread Message or not.

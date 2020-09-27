@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/mdp/qrterminal/v3"
 
 	"github.com/Bios-Marcel/cordless/fileopen"
+	"github.com/Bios-Marcel/cordless/logging"
 	"github.com/Bios-Marcel/cordless/util/files"
 	"github.com/Bios-Marcel/cordless/util/fuzzy"
 	"github.com/Bios-Marcel/cordless/util/text"
@@ -125,7 +127,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	}
 
 	window.commandView = NewCommandView(window.ExecuteCommand)
-	log.SetOutput(window.commandView)
+	logging.SetAdditionalOutput(window.commandView)
 
 	for _, engine := range window.extensionEngines {
 		initError := window.initExtensionEngine(engine)
@@ -174,6 +176,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	window.guildList = guildList
 	window.guildList.UpdateUnreadGuildCount()
 	guildList.SetOnGuildSelect(func(node *tview.TreeNode, guildID string) {
+		//Update previously selected guild.
 		if window.selectedGuild != nil && window.selectedGuildNode != nil {
 			window.updateServerReadStatus(window.selectedGuildNode, false)
 		}
@@ -513,11 +516,19 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 				if stateError == nil {
 					filteredRoles := fuzzy.ScoreAndSortRoles(value, guild.Roles)
 					for _, role := range filteredRoles {
-						autocompleteValues = append(autocompleteValues, &AutocompleteValue{
-							RenderValue: role.Name,
-							//FIXME Inconsistent, we should change this.
-							InsertValue: "<@&" + role.ID + ">",
-						})
+						//Workaround for discord just having a default role called "@everyone"
+						if role.Name == "@everyone" {
+							autocompleteValues = append(autocompleteValues, &AutocompleteValue{
+								RenderValue: role.Name,
+								InsertValue: "@everyone",
+							})
+						} else {
+							autocompleteValues = append(autocompleteValues, &AutocompleteValue{
+								RenderValue: role.Name,
+								InsertValue: "<@&" + role.ID + ">",
+							})
+
+						}
 					}
 
 					filteredMembers := fuzzy.ScoreAndSortMembers(value, guild.Members)
@@ -822,16 +833,13 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		window.userList.internalTreeView.SetSearchOnTypeEnabled(true)
 		window.privateList.internalTreeView.SetSearchOnTypeEnabled(true)
 	} else if config.Current.OnTypeInListBehaviour == config.FocusMessageInputOnTypeInList {
-		guildList.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
-		channelTree.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
-		window.userList.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
-		window.privateList.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
-		window.chatView.internalTextView.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
+		focusTextViewOnTypeInputHandler := tviewutil.CreateFocusTextViewOnTypeInputHandler(
+			window.app, window.messageInput.internalTextView)
+		guildList.SetInputCapture(focusTextViewOnTypeInputHandler)
+		channelTree.SetInputCapture(focusTextViewOnTypeInputHandler)
+		window.userList.SetInputCapture(focusTextViewOnTypeInputHandler)
+		window.privateList.SetInputCapture(focusTextViewOnTypeInputHandler)
+		window.chatView.internalTextView.SetInputCapture(focusTextViewOnTypeInputHandler)
 	}
 
 	//Guild Container arrow key navigation. Please end my life.
@@ -853,6 +861,17 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 
 		if shortcuts.FocusRight.Equals(event) {
 			window.app.SetFocus(window.chatView.internalTextView)
+			return nil
+		}
+
+		if shortcuts.GuildListMarkRead.Equals(event) {
+			selectedGuildNode := guildList.GetCurrentNode()
+			if selectedGuildNode != nil && !readstate.HasGuildBeenRead(selectedGuildNode.GetReference().(string)) {
+				ackError := window.session.GuildMessageAck(selectedGuildNode.GetReference().(string))
+				if ackError != nil {
+					window.ShowErrorDialog(ackError.Error())
+				}
+			}
 			return nil
 		}
 
@@ -899,6 +918,20 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 				window.app.SetFocus(window.commandView.commandOutput)
 			} else {
 				window.app.SetFocus(window.messageInput.GetPrimitive())
+			}
+			return nil
+		}
+
+		if shortcuts.ChannelTreeMarkRead.Equals(event) {
+			selectedChannelNode := channelTree.GetCurrentNode()
+			if selectedChannelNode != nil {
+				channel, stateError := window.session.State.Channel(selectedChannelNode.GetReference().(string))
+				if stateError == nil && channel.LastMessageID != "" && !readstate.HasBeenRead(channel, channel.LastMessageID) {
+					_, ackError := window.session.ChannelMessageAck(channel.ID, channel.LastMessageID, "")
+					if ackError != nil {
+						window.ShowErrorDialog(ackError.Error())
+					}
+				}
 			}
 			return nil
 		}
@@ -1183,9 +1216,18 @@ important changes of the last two versions officially released.
 
 [::b]THIS VERSION
 	- Features
+		- Mark guilds as read
+		- Mark guild channels as read
+		- Write to logfile by setting "--log"
+		- Mentions are now displayed in the guild list
+		- You can now bulk send folders and files
 	- Changes
 		- There's now a double-colon to separate author and messages
+		- There's more customizable shortcuts now
 	- Bugfixes
+		- Muted guilds, channels and categories shouldn't be displayed as
+		  unread anymore
+		- @everyone works again, so you can piss of others again
 		- Messages containing links won't disappear anymore after sending
 		- Messages from blocked users won't trigger notifications anymore
 		- No more spammed empty error messages when receiving notifications
@@ -1383,6 +1425,52 @@ func (window *Window) TrySendMessage(targetChannel *discordgo.Channel, message s
 		return
 	}
 
+	if window.editingMessageID != nil {
+		window.editMessage(targetChannel.ID, *window.editingMessageID, message)
+		return
+	}
+
+	if strings.HasPrefix(message, "file://") {
+		window.app.QueueUpdateDraw(func() {
+			yesButton := "Yes"
+			window.ShowDialog(config.GetTheme().PrimitiveBackgroundColor, "Resolve filepath and send a file instead?", func(button string) {
+				if button == yesButton {
+					window.messageInput.SetText("")
+					go func() {
+						path, pathError := files.ToAbsolutePath(message)
+						if pathError != nil {
+							window.app.QueueUpdateDraw(func() {
+								window.ShowErrorDialog(pathError.Error())
+							})
+							return
+						}
+						data, readError := ioutil.ReadFile(path)
+						if readError != nil {
+							window.app.QueueUpdateDraw(func() {
+								window.ShowErrorDialog(readError.Error())
+							})
+							return
+						}
+						reader := bytes.NewBuffer(data)
+						_, sendError := window.session.ChannelFileSend(targetChannel.ID, filepath.Base(message), reader)
+						if sendError != nil {
+							window.app.QueueUpdateDraw(func() {
+								window.ShowErrorDialog(sendError.Error())
+							})
+						}
+					}()
+				} else {
+					window.sendMessageWithLengthCheck(targetChannel, message)
+				}
+			}, yesButton, "No")
+		})
+		return
+	}
+
+	window.sendMessageWithLengthCheck(targetChannel, message)
+}
+
+func (window *Window) sendMessageWithLengthCheck(targetChannel *discordgo.Channel, message string) {
 	message = window.prepareMessage(targetChannel, message)
 	overlength := len(message) - 2000
 	if overlength > 0 {
@@ -1396,11 +1484,6 @@ func (window *Window) TrySendMessage(targetChannel *discordgo.Channel, message s
 					}
 				}, sendAsFile, "Nothing")
 		})
-		return
-	}
-
-	if window.editingMessageID != nil {
-		window.editMessage(targetChannel.ID, *window.editingMessageID, message)
 		return
 	}
 
@@ -1452,8 +1535,19 @@ func (window *Window) sendMessage(targetChannelID, message string) {
 }
 
 func (window *Window) updateServerReadStatus(guildNode *tview.TreeNode, isSelected bool) {
-	window.guildList.UpdateNodeState(guildNode, isSelected)
-	window.guildList.UpdateUnreadGuildCount()
+	guild, cacheError := window.session.State.Guild(guildNode.GetReference().(string))
+	if cacheError == nil {
+		window.guildList.UpdateNodeState(guild, guildNode, isSelected)
+		window.guildList.UpdateUnreadGuildCount()
+	}
+}
+
+func (window *Window) updateServerReadStatusByID(guildID string, isSelected bool) {
+	guild, cacheError := window.session.State.Guild(guildID)
+	if cacheError == nil && guild != nil {
+		window.guildList.UpdateNodeStateByGuild(guild, isSelected)
+		window.guildList.UpdateUnreadGuildCount()
+	}
 }
 
 // prepareMessage prepares a message for being sent to the discord API.
@@ -1858,7 +1952,10 @@ func (window *Window) startMessageHandlerRoutines(input, edit, delete chan *disc
 					}
 				} else if channel.Type == discordgo.ChannelTypeGuildText {
 					if discordutil.MentionsCurrentUserExplicitly(window.session.State, message) {
+						readstate.MarkAsMentioned(channel.ID)
 						window.app.QueueUpdateDraw(func() {
+							isCurrentGuild := window.selectedGuild != nil && window.selectedGuild.ID == channel.GuildID
+							window.updateServerReadStatusByID(channel.GuildID, isCurrentGuild)
 							window.channelTree.MarkChannelAsMentioned(channel.ID)
 						})
 					} else if !readstate.IsGuildChannelMuted(channel) {
@@ -2695,7 +2792,7 @@ func (window *Window) LoadChannel(channel *discordgo.Channel) error {
 
 	//Unlike with the channel, where we can assume it is read, we gotta check
 	//whether there is still an unread channel and mark the server accordingly.
-	wasSelectedGuild := window.selectedGuild != nil && window.selectedGuild.ID != channel.GuildID
+	wasSelectedGuild := window.selectedGuild != nil && window.selectedGuild.ID == channel.GuildID
 
 	if channel.GuildID == "" {
 		window.selectedGuild = nil
@@ -2721,9 +2818,7 @@ func (window *Window) LoadChannel(channel *discordgo.Channel) error {
 			guild, cacheError := window.session.State.Guild(channel.GuildID)
 
 			window.app.QueueUpdateDraw(func() {
-				if wasSelectedGuild {
-					window.updateServerReadStatus(window.selectedGuildNode, false)
-				}
+				window.updateServerReadStatusByID(channel.GuildID, wasSelectedGuild)
 
 				if cacheError == nil {
 					window.selectedGuild = guild
