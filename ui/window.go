@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
+	"github.com/skratchdot/open-golang/open"
 
 	"github.com/Bios-Marcel/cordless/fileopen"
 	"github.com/Bios-Marcel/cordless/logging"
@@ -156,7 +158,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	window.channelTree = channelTree
 	channelTree.SetOnChannelSelect(func(channelID string) {
 		channel, cacheError := window.session.State.Channel(channelID)
-		if cacheError == nil {
+		if cacheError == nil && channel.Type != discordgo.ChannelTypeGuildCategory {
 			go func() {
 				window.chatView.Lock()
 				defer window.chatView.Unlock()
@@ -401,10 +403,28 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 						window.ShowCustomErrorDialog("Couldn't open file", openError.Error())
 					}
 				}
+
+				urlMatches := urlRegex.FindAllString(message.Content, 1000)
+				for _, url := range urlMatches {
+					header, _ := http.Head(url)
+
+					//A website! Any other text/ could be a file, like .txt, .css or whatever.
+					//Is there a more bulletproof way to doing this?
+					if strings.Contains(header.Header.Get("Content-Type"), "text/html") {
+						//We hope to just open this with the users browser ;)
+						open.Run(url)
+						continue
+					}
+
+					openError := fileopen.OpenFile(targetFolder, "file", url)
+					if openError != nil {
+						window.ShowCustomErrorDialog("Couldn't open file", openError.Error())
+					}
+				}
 			}
 
 			//If permanent saving isn't disabled, we clear files older
-			//than one month whenever something is opened. Since this
+			//than two weeks whenever something is opened. Since this
 			//will happen in a background thread, it won't cause
 			//application blocking.
 			if !config.Current.FileOpenSaveFilesPermanently && targetFolder != "" {
@@ -419,6 +439,21 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 			if pathError != nil || absolutePath == "" {
 				window.ShowErrorDialog("Please specify a valid path in 'FileOpenSaveFolder' of your configuration.")
 			} else {
+				downloadFunction := func(savePath, fileURL string) {
+					_, statErr := os.Stat(savePath)
+					//If the file exists already, we needn't do anything.
+					if statErr == nil {
+						return
+					}
+
+					downloadError := files.DownloadFile(savePath, fileURL)
+					if downloadError != nil {
+						window.app.QueueUpdateDraw(func() {
+							window.ShowErrorDialog("Error download file: " + downloadError.Error())
+						})
+					}
+				}
+
 				for _, file := range message.Attachments {
 					extension := strings.TrimPrefix(filepath.Ext(file.URL), ".")
 					targetFile := filepath.Join(absolutePath, file.ID+"."+extension)
@@ -426,21 +461,22 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 					//All files are downloaded separately in order to not
 					//block the UI and not download for ages if one or more
 					//page has a slow download speed.
-					go func(savePath, fileURL string) {
-						_, statErr := os.Stat(savePath)
-						//If it's a different error, we don't care. Other errors
-						//will run into later anyways.
-						if statErr == os.ErrExist {
-							return
-						}
+					go downloadFunction(targetFile, file.URL)
+				}
 
-						downloadError := files.DownloadFile(savePath, fileURL)
-						if downloadError != nil {
-							window.app.QueueUpdateDraw(func() {
-								window.ShowErrorDialog("Error download file: " + downloadError.Error())
-							})
-						}
-					}(targetFile, file.URL)
+				urlMatches := urlRegex.FindAllString(message.Content, 1000)
+				for _, url := range urlMatches {
+					baseName := filepath.Base(url)
+					if baseName == "" {
+						continue
+					}
+
+					targetFile := filepath.Join(absolutePath, filepath.Base(url))
+
+					//All files are downloaded separately in order to not
+					//block the UI and not download for ages if one or more
+					//page has a slow download speed.
+					go downloadFunction(targetFile, url)
 				}
 			}
 			return nil
@@ -929,12 +965,9 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		if shortcuts.ChannelTreeMarkRead.Equals(event) {
 			selectedChannelNode := channelTree.GetCurrentNode()
 			if selectedChannelNode != nil {
-				channel, stateError := window.session.State.Channel(selectedChannelNode.GetReference().(string))
-				if stateError == nil && channel.LastMessageID != "" && !readstate.HasBeenRead(channel, channel.LastMessageID) {
-					_, ackError := window.session.ChannelMessageAck(channel.ID, channel.LastMessageID, "")
-					if ackError != nil {
-						window.ShowErrorDialog(ackError.Error())
-					}
+				ackError := discordutil.AcknowledgeChannel(window.session, selectedChannelNode.GetReference().(string))
+				if ackError != nil {
+					window.ShowErrorDialog(ackError.Error())
 				}
 			}
 			return nil
@@ -1082,25 +1115,27 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	}
 
 	window.session.AddHandler(func(s *discordgo.Session, event *discordgo.MessageAck) {
-		if readstate.UpdateReadLocal(event.ChannelID, event.MessageID) {
-			channel, stateError := s.State.Channel(event.ChannelID)
-			if stateError == nil && event.MessageID == channel.LastMessageID {
-				if channel.GuildID == "" {
-					window.privateList.MarkChannelAsRead(channel.ID)
-				} else {
-					if window.selectedGuild != nil && channel.GuildID == window.selectedGuild.ID {
-						window.channelTree.MarkChannelAsRead(channel.ID)
+		window.app.QueueUpdateDraw(func() {
+			if readstate.UpdateReadLocal(event.ChannelID, event.MessageID) {
+				channel, stateError := s.State.Channel(event.ChannelID)
+				if stateError == nil && event.MessageID == channel.LastMessageID {
+					if channel.GuildID == "" {
+						window.privateList.MarkChannelAsRead(channel.ID)
 					} else {
-						for _, guildNode := range window.guildList.GetRoot().GetChildren() {
-							if guildNode.GetReference() == channel.GuildID {
-								window.updateServerReadStatus(guildNode, false)
-								break
+						if window.selectedGuild != nil && channel.GuildID == window.selectedGuild.ID {
+							window.channelTree.MarkChannelAsRead(channel.ID)
+						} else {
+							for _, guildNode := range window.guildList.GetRoot().GetChildren() {
+								if guildNode.GetReference() == channel.GuildID {
+									window.updateServerReadStatus(guildNode, false)
+									break
+								}
 							}
 						}
 					}
 				}
 			}
-		}
+		})
 	})
 
 	window.commandView.SetInputCaptureForInput(func(event *tcell.EventKey) *tcell.EventKey {
