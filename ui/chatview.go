@@ -32,7 +32,10 @@ import (
 )
 
 const dashCharacter = "\u2500"
-const EMBED_TIMESTAMP_FORMAT = "2006-01-02 15:04"
+
+// embedTimestampFormat represents the format for times used when
+// rendering embeds.
+const embedTimestampFormat = "2006-01-02 15:04"
 
 var (
 	successiveCustomEmojiRegex = regexp.MustCompile("<a?:.+?:\\d+(><)a?:.+?:\\d+>")
@@ -49,6 +52,8 @@ var (
 // in a simple way. It supports highlighting specific element types and it
 // also supports multiline.
 type ChatView struct {
+	*sync.Mutex
+
 	internalTextView *tview.TextView
 
 	shortener *linkshortener.Shortener
@@ -69,13 +74,12 @@ type ChatView struct {
 	formattedMessages  map[string]string
 
 	onMessageAction func(message *discordgo.Message, event *tcell.EventKey) *tcell.EventKey
-
-	mutex *sync.Mutex
 }
 
 // NewChatView constructs a new ready to use ChatView.
 func NewChatView(state *discordgo.State, ownUserID string) *ChatView {
 	chatView := ChatView{
+		data:             make([]*discordgo.Message, 0, 100),
 		internalTextView: tview.NewTextView(),
 		state:            state,
 		ownUserID:        ownUserID,
@@ -90,7 +94,7 @@ func NewChatView(state *discordgo.State, ownUserID string) *ChatView {
 		shortenLinks:         config.Current.ShortenLinks,
 		shortenWithExtension: config.Current.ShortenWithExtension,
 		formattedMessages:    make(map[string]string),
-		mutex:                &sync.Mutex{},
+		Mutex:                &sync.Mutex{},
 	}
 
 	if chatView.shortenLinks {
@@ -115,7 +119,7 @@ func NewChatView(state *discordgo.State, ownUserID string) *ChatView {
 
 	chatView.internalTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if chatView.selectionMode && event.Modifiers() == tcell.ModNone {
-			if event.Key() == tcell.KeyUp {
+			if shortcuts.ChatViewSelectionUp.Equals(event) {
 				if chatView.selection == -1 {
 					chatView.selection = len(chatView.data) - 1
 				} else if chatView.selection >= 1 {
@@ -129,7 +133,7 @@ func NewChatView(state *discordgo.State, ownUserID string) *ChatView {
 				return nil
 			}
 
-			if event.Key() == tcell.KeyDown {
+			if shortcuts.ChatViewSelectionDown.Equals(event) {
 				if chatView.selection == -1 {
 					chatView.selection = 0
 				} else if chatView.selection <= len(chatView.data)-2 {
@@ -143,7 +147,7 @@ func NewChatView(state *discordgo.State, ownUserID string) *ChatView {
 				return nil
 			}
 
-			if event.Key() == tcell.KeyHome {
+			if shortcuts.ChatViewSelectionTop.Equals(event) {
 				if chatView.selection != 0 {
 					chatView.selection = 0
 
@@ -153,7 +157,7 @@ func NewChatView(state *discordgo.State, ownUserID string) *ChatView {
 				return nil
 			}
 
-			if event.Key() == tcell.KeyEnd {
+			if shortcuts.ChatViewSelectionBottom.Equals(event) {
 				if chatView.selection != len(chatView.data)-1 {
 					chatView.selection = len(chatView.data) - 1
 
@@ -282,7 +286,9 @@ OUTER_LOOP:
 // ClearViewAndCache clears the TextView buffer and removes all data for
 // all messages.
 func (chatView *ChatView) ClearViewAndCache() {
-	chatView.data = make([]*discordgo.Message, 0)
+	//100 as default size, as we usually have message. Even if not, this
+	//is worth the memory overhead.
+	chatView.data = make([]*discordgo.Message, 0, 100)
 	chatView.showSpoilerContent = make(map[string]bool)
 	chatView.formattedMessages = make(map[string]string)
 	chatView.selection = -1
@@ -442,7 +448,7 @@ func (chatView *ChatView) formatMessageAuthor(message *discordgo.Message) string
 		userColor = discordutil.GetUserColor(message.Author)
 	}
 
-	return "[::b][" + userColor + "]" + messageAuthor + "[::-]"
+	return "[::b][" + userColor + "]" + messageAuthor + ":[::-]"
 }
 
 func (chatView *ChatView) formatMessageText(message *discordgo.Message) string {
@@ -512,7 +518,7 @@ func (chatView *ChatView) formatDefaultMessageText(message *discordgo.Message) s
 		}
 
 		var color string
-		if vtxxx {
+		if tview.IsVtxxx {
 			if chatView.state.User.ID == user.ID {
 				color = "[::r]"
 			} else {
@@ -527,7 +533,7 @@ func (chatView *ChatView) formatDefaultMessageText(message *discordgo.Message) s
 		}
 
 		var replacement string
-		if vtxxx {
+		if tview.IsVtxxx {
 			replacement = color + "@" + userName + "[::-]"
 		} else {
 			replacement = color + "@" + userName + "[" + tviewutil.ColorToHex(config.GetTheme().PrimaryTextColor) + "]"
@@ -787,7 +793,7 @@ func (chatView *ChatView) formatDefaultMessageText(message *discordgo.Message) s
 					embedBuffer.WriteString(" - ")
 				}
 				localTime := parsedTimestamp.Local()
-				embedBuffer.WriteString(localTime.Format(EMBED_TIMESTAMP_FORMAT))
+				embedBuffer.WriteString(localTime.Format(embedTimestampFormat))
 			} else {
 				log.Println("Error parsing time: " + err.Error())
 			}
@@ -795,8 +801,6 @@ func (chatView *ChatView) formatDefaultMessageText(message *discordgo.Message) s
 
 		messageBuffer.WriteString(strings.Replace(parseBoldAndUnderline(embedBuffer.String()), "\n", "\n"+color+"▐["+defaultColor+"] ", -1))
 		embedBuffer.WriteRune('\n')
-
-		//TODO embed.Timestamp
 	}
 
 	return messageBuffer.String()
@@ -1043,15 +1047,4 @@ func (chatView *ChatView) SetMessages(messages []*discordgo.Message) {
 	if wasScrolledToTheEnd {
 		chatView.internalTextView.ScrollToEnd()
 	}
-}
-
-// Lock will lock the ChatView, allowing other callers to prevent race
-// conditions.
-func (chatView *ChatView) Lock() {
-	chatView.mutex.Lock()
-}
-
-// Unlock unlocks the previously locked ChatView.
-func (chatView *ChatView) Unlock() {
-	chatView.mutex.Unlock()
 }

@@ -209,9 +209,18 @@ func (a *Application) Run() error {
 		}
 	}()
 
+	focusFunc := func(p Primitive) {
+		a.SetFocus(p)
+	}
+
 	// Start event loop.
+	var keyEventHandleHierarchy []Primitive
 EventLoop:
 	for {
+		//resize slice to zero without having to allocate a new array.
+		//We want to avoid slowdowns and unnecessary garbage collection during
+		//user input. This could especially effect stuff like pasting.
+		keyEventHandleHierarchy = keyEventHandleHierarchy[0:0]
 		select {
 		case event := <-a.events:
 			if event == nil {
@@ -236,11 +245,27 @@ EventLoop:
 
 				// Pass other key events to the currently focused primitive.
 				if p != nil {
-					if handler := p.InputHandler(); handler != nil {
-						handler(event, func(p Primitive) {
-							a.SetFocus(p)
-						})
-						a.draw()
+					lastParent := p
+					for {
+						keyEventHandleHierarchy = append(keyEventHandleHierarchy, lastParent)
+						lastParent = lastParent.GetParent()
+
+						if lastParent == nil {
+							break
+						}
+					}
+
+					//Events are handled from bottom to top, so parents get
+					//handled before the actually focused primitive.
+					for i := len(keyEventHandleHierarchy) - 1; i >= 0; i-- {
+						nextFocusHandlingComponent := keyEventHandleHierarchy[i]
+						if handler := nextFocusHandlingComponent.InputHandler(); handler != nil {
+							event := handler(event, focusFunc)
+							if event == nil {
+								a.draw()
+								break
+							}
+						}
 					}
 				}
 			case *tcell.EventResize:

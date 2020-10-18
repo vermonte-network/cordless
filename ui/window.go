@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
+	"github.com/skratchdot/open-golang/open"
 
 	"github.com/Bios-Marcel/cordless/fileopen"
+	"github.com/Bios-Marcel/cordless/logging"
 	"github.com/Bios-Marcel/cordless/util/files"
 	"github.com/Bios-Marcel/cordless/util/fuzzy"
 	"github.com/Bios-Marcel/cordless/util/text"
@@ -72,14 +75,9 @@ type Window struct {
 
 	session *discordgo.Session
 
-	selectedGuildNode   *tview.TreeNode
-	previousGuildNode   *tview.TreeNode
-	selectedGuild       *discordgo.Guild
-	previousGuild       *discordgo.Guild
-	selectedChannelNode *tview.TreeNode
-	previousChannelNode *tview.TreeNode
-	selectedChannel     *discordgo.Channel
-	previousChannel     *discordgo.Channel
+	selectedGuild   *discordgo.Guild
+	selectedChannel *discordgo.Channel
+	previousChannel *discordgo.Channel
 
 	extensionEngines []scripting.Engine
 
@@ -125,7 +123,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	}
 
 	window.commandView = NewCommandView(window.ExecuteCommand)
-	log.SetOutput(window.commandView)
+	logging.SetAdditionalOutput(window.commandView)
 
 	for _, engine := range window.extensionEngines {
 		initError := window.initExtensionEngine(engine)
@@ -154,17 +152,11 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	window.channelTree = channelTree
 	channelTree.SetOnChannelSelect(func(channelID string) {
 		channel, cacheError := window.session.State.Channel(channelID)
-		if cacheError == nil {
-			go func() {
-				window.chatView.Lock()
-				defer window.chatView.Unlock()
-				window.QueueUpdateDrawSynchronized(func() {
-					loadError := window.LoadChannel(channel)
-					if loadError == nil {
-						channelTree.MarkChannelAsLoaded(channelID)
-					}
-				})
-			}()
+		if cacheError == nil && channel.Type != discordgo.ChannelTypeGuildCategory {
+			loadError := window.LoadChannel(channel)
+			if loadError != nil {
+				window.ShowErrorDialog(loadError.Error())
+			}
 		}
 	})
 	window.registerGuildChannelHandler()
@@ -173,9 +165,10 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	guildList := NewGuildList(guilds)
 	window.guildList = guildList
 	window.guildList.UpdateUnreadGuildCount()
-	guildList.SetOnGuildSelect(func(node *tview.TreeNode, guildID string) {
-		if window.selectedGuild != nil && window.selectedGuildNode != nil {
-			window.updateServerReadStatus(window.selectedGuildNode, false)
+	guildList.SetOnGuildSelect(func(guildID string) {
+		//Update previously selected guild.
+		if window.selectedGuild != nil {
+			window.updateServerReadStatus(window.selectedGuild.ID, false)
 		}
 
 		guild, cacheError := window.session.Guild(guildID)
@@ -184,20 +177,8 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 			return
 		}
 
-		// previousGuild and previousGuildNode should be set initially.
-		// If going from first guild -> private chat, SwitchToPreviousChannel would crash.
-		if window.selectedGuildNode == nil {
-			window.previousGuildNode = node
-			window.previousGuild = guild
-		} else if window.previousGuildNode != window.selectedGuildNode {
-			window.previousGuildNode = window.selectedGuildNode
-			window.previousGuild = window.selectedGuild
-		}
-
-		window.selectedGuildNode = node
 		window.selectedGuild = guild
-
-		window.updateServerReadStatus(window.selectedGuildNode, true)
+		window.updateServerReadStatus(guild.ID, true)
 
 		//FIXME Request presences as soon as that stuff remotely works?
 		requestError := session.RequestGuildMembers(guildID, "", 0, false)
@@ -214,17 +195,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 			}
 		}
 
-		//Currently has to happen before userlist loading, as it might not load otherwise
-		window.RefreshLayout()
-
-		window.userList.Clear()
-		if window.userList.internalTreeView.IsVisible() {
-			userLoadError := window.userList.LoadGuild(guildID)
-			if userLoadError != nil {
-				window.ShowErrorDialog(userLoadError.Error())
-			}
-		}
-
+		window.updateUserList()
 	})
 
 	window.registerGuildHandlers()
@@ -240,64 +211,27 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	window.leftArea.AddItem(window.privateList.GetComponent(), 1, 0, false)
 	window.leftArea.AddItem(window.guildPage, 0, 1, false)
 
-	window.privateList.SetOnChannelSelect(func(node *tview.TreeNode, channelID string) {
+	window.privateList.SetOnChannelSelect(func(channelID string) {
 		channel, stateError := window.session.State.Channel(channelID)
 		if stateError != nil {
 			window.ShowErrorDialog(fmt.Sprintf("Error loading chat: %s", stateError.Error()))
 			return
 		}
 
-		go func() {
-			window.chatView.Lock()
-			defer window.chatView.Unlock()
-			window.QueueUpdateDrawSynchronized(func() {
-				window.userList.Clear()
-				window.RefreshLayout()
+		window.chatView.Lock()
+		defer window.chatView.Unlock()
 
-				if channel.Type == discordgo.ChannelTypeGroupDM {
-
-					if window.userList.internalTreeView.IsVisible() {
-						loadError := window.userList.LoadGroup(channel.ID)
-						if loadError != nil {
-							fmt.Fprintln(window.commandView.commandOutput, "Error loading users for channel.")
-						}
-					}
-				}
-
-			})
-			window.QueueUpdateDrawSynchronized(func() {
-				window.LoadChannel(channel)
-			})
-		}()
+		loadError := window.LoadChannel(channel)
+		if loadError != nil {
+			window.ShowErrorDialog(loadError.Error())
+		}
 	})
 
 	window.privateList.SetOnFriendSelect(func(userID string) {
-		go func() {
-			window.chatView.Lock()
-			defer window.chatView.Unlock()
-			userChannels, _ := window.session.UserChannels()
-			for _, userChannel := range userChannels {
-				if userChannel.Type == discordgo.ChannelTypeDM && userChannel.Recipients[0].ID == userID {
-					window.QueueUpdateDrawSynchronized(func() {
-						window.loadPrivateChannel(userChannel)
-					})
-					return
-				}
-			}
-
-			newChannel, discordError := window.session.UserChannelCreate(userID)
-			if discordError == nil {
-				messages, discordError := window.session.ChannelMessages(newChannel.ID, 100, "", "", "")
-				if discordError == nil {
-					for _, message := range messages {
-						window.session.State.MessageAdd(message)
-					}
-				}
-				window.QueueUpdateDrawSynchronized(func() {
-					window.loadPrivateChannel(newChannel)
-				})
-			}
-		}()
+		dmError := window.OpenDirectMessage(userID)
+		if dmError != nil {
+			window.ShowErrorDialog(dmError.Error())
+		}
 	})
 
 	window.chatArea = tview.NewFlex().
@@ -307,6 +241,14 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	window.chatView.SetOnMessageAction(func(message *discordgo.Message, event *tcell.EventKey) *tcell.EventKey {
 		if shortcuts.QuoteSelectedMessage.Equals(event) {
 			window.insertQuoteOfMessage(message)
+			return nil
+		}
+
+		if shortcuts.NewDirectMessage.Equals(event) {
+			dmError := window.OpenDirectMessage(message.Author.ID)
+			if dmError != nil {
+				window.ShowErrorDialog(dmError.Error())
+			}
 			return nil
 		}
 
@@ -337,25 +279,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		}
 
 		if shortcuts.CopySelectedMessage.Equals(event) {
-			content := message.ContentWithMentionsReplaced()
-			if len(message.Attachments) == 1 {
-				if content == "" {
-					content = message.Attachments[0].URL
-				} else {
-					content += "\n" + message.Attachments[0].URL
-				}
-			} else if len(message.Attachments) > 1 {
-				links := make([]string, 0, len(message.Attachments))
-				for _, file := range message.Attachments {
-					links = append(links, file.URL)
-				}
-				if content == "" {
-					content = strings.Join(links, "\n")
-				} else {
-					content += "\n" + strings.Join(links, "\n")
-				}
-			}
-			copyError := clipboard.WriteAll(content)
+			copyError := clipboard.WriteAll(discordutil.MessageToPlainText(message))
 			if copyError != nil {
 				window.ShowErrorDialog(fmt.Sprintf("Error copying message: %s", copyError.Error()))
 			}
@@ -394,10 +318,28 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 						window.ShowCustomErrorDialog("Couldn't open file", openError.Error())
 					}
 				}
+
+				urlMatches := urlRegex.FindAllString(message.Content, 1000)
+				for _, url := range urlMatches {
+					header, _ := http.Head(url)
+
+					//A website! Any other text/ could be a file, like .txt, .css or whatever.
+					//Is there a more bulletproof way to doing this?
+					if strings.Contains(header.Header.Get("Content-Type"), "text/html") {
+						//We hope to just open this with the users browser ;)
+						open.Run(url)
+						continue
+					}
+
+					openError := fileopen.OpenFile(targetFolder, "file", url)
+					if openError != nil {
+						window.ShowCustomErrorDialog("Couldn't open file", openError.Error())
+					}
+				}
 			}
 
 			//If permanent saving isn't disabled, we clear files older
-			//than one month whenever something is opened. Since this
+			//than two weeks whenever something is opened. Since this
 			//will happen in a background thread, it won't cause
 			//application blocking.
 			if !config.Current.FileOpenSaveFilesPermanently && targetFolder != "" {
@@ -412,6 +354,21 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 			if pathError != nil || absolutePath == "" {
 				window.ShowErrorDialog("Please specify a valid path in 'FileOpenSaveFolder' of your configuration.")
 			} else {
+				downloadFunction := func(savePath, fileURL string) {
+					_, statErr := os.Stat(savePath)
+					//If the file exists already, we needn't do anything.
+					if statErr == nil {
+						return
+					}
+
+					downloadError := files.DownloadFile(savePath, fileURL)
+					if downloadError != nil {
+						window.app.QueueUpdateDraw(func() {
+							window.ShowErrorDialog("Error download file: " + downloadError.Error())
+						})
+					}
+				}
+
 				for _, file := range message.Attachments {
 					extension := strings.TrimPrefix(filepath.Ext(file.URL), ".")
 					targetFile := filepath.Join(absolutePath, file.ID+"."+extension)
@@ -419,21 +376,22 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 					//All files are downloaded separately in order to not
 					//block the UI and not download for ages if one or more
 					//page has a slow download speed.
-					go func(savePath, fileURL string) {
-						_, statErr := os.Stat(savePath)
-						//If it's a different error, we don't care. Other errors
-						//will run into later anyways.
-						if statErr == os.ErrExist {
-							return
-						}
+					go downloadFunction(targetFile, file.URL)
+				}
 
-						downloadError := files.DownloadFile(savePath, fileURL)
-						if downloadError != nil {
-							window.app.QueueUpdateDraw(func() {
-								window.ShowErrorDialog("Error download file: " + downloadError.Error())
-							})
-						}
-					}(targetFile, file.URL)
+				urlMatches := urlRegex.FindAllString(message.Content, 1000)
+				for _, url := range urlMatches {
+					baseName := filepath.Base(url)
+					if baseName == "" {
+						continue
+					}
+
+					targetFile := filepath.Join(absolutePath, filepath.Base(url))
+
+					//All files are downloaded separately in order to not
+					//block the UI and not download for ages if one or more
+					//page has a slow download speed.
+					go downloadFunction(targetFile, url)
 				}
 			}
 			return nil
@@ -513,11 +471,19 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 				if stateError == nil {
 					filteredRoles := fuzzy.ScoreAndSortRoles(value, guild.Roles)
 					for _, role := range filteredRoles {
-						autocompleteValues = append(autocompleteValues, &AutocompleteValue{
-							RenderValue: role.Name,
-							//FIXME Inconsistent, we should change this.
-							InsertValue: "<@&" + role.ID + ">",
-						})
+						//Workaround for discord just having a default role called "@everyone"
+						if role.Name == "@everyone" {
+							autocompleteValues = append(autocompleteValues, &AutocompleteValue{
+								RenderValue: role.Name,
+								InsertValue: "@everyone",
+							})
+						} else {
+							autocompleteValues = append(autocompleteValues, &AutocompleteValue{
+								RenderValue: role.Name,
+								InsertValue: "<@&" + role.ID + ">",
+							})
+
+						}
 					}
 
 					filteredMembers := fuzzy.ScoreAndSortMembers(value, guild.Members)
@@ -643,50 +609,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		return autocompleteValues
 	})
 
-	captureFunc := func(event *tcell.EventKey) *tcell.EventKey {
-		messageToSend := window.messageInput.GetText()
-
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.chatView.internalTextView)
-				return nil
-			}
-
-			if event.Key() == tcell.KeyDown {
-				if window.commandMode {
-					window.app.SetFocus(window.commandView.commandOutput)
-				} else {
-					window.app.SetFocus(window.chatView.internalTextView)
-				}
-				return nil
-			}
-
-			if event.Key() == tcell.KeyRight {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					if window.activeView == Guilds {
-						window.app.SetFocus(window.channelTree)
-						return nil
-					} else if window.activeView == Dms {
-						window.app.SetFocus(window.privateList.internalTreeView)
-						return nil
-					}
-				}
-				return nil
-			}
-
-			if event.Key() == tcell.KeyLeft {
-				if window.activeView == Guilds {
-					window.app.SetFocus(window.channelTree)
-					return nil
-				} else if window.activeView == Dms {
-					window.app.SetFocus(window.privateList.internalTreeView)
-					return nil
-				}
-			}
-		}
-
+	window.messageInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Modifiers() == tcell.ModCtrl {
 			if event.Key() == tcell.KeyUp {
 				window.chatView.internalTextView.ScrollUp()
@@ -738,13 +661,16 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		}
 
 		//When you are already typing a message, you probably don't want to risk loosing it.
-		if event.Key() == tcell.KeyUp && (messageToSend == "" || window.editingMessageID != nil) {
-			messageToEdit := chooseNextMessageToEdit(len(window.chatView.data)-1, -1, func(i int) int { return i - 1 })
-			if messageToEdit != nil {
-				window.startEditingMessage(messageToEdit)
-			}
+		if event.Key() == tcell.KeyUp {
+			messageToSend := window.messageInput.GetText()
+			if messageToSend == "" || window.editingMessageID != nil {
+				messageToEdit := chooseNextMessageToEdit(len(window.chatView.data)-1, -1, func(i int) int { return i - 1 })
+				if messageToEdit != nil {
+					window.startEditingMessage(messageToEdit)
+				}
 
-			return nil
+				return nil
+			}
 		}
 
 		if event.Key() == tcell.KeyDown && window.editingMessageID != nil {
@@ -797,6 +723,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 			window.insertNewLineAtCursor()
 			return nil
 		} else if shortcuts.SendMessage.Equals(event) {
+			messageToSend := window.messageInput.GetText()
 			if window.selectedChannel != nil {
 				window.TrySendMessage(window.selectedChannel, messageToSend)
 			}
@@ -804,8 +731,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		}
 
 		return event
-	}
-	window.messageInput.SetInputCapture(captureFunc)
+	})
 
 	//FIXME Buffering might just be retarded, as the event handlers are launched in separate routines either way.
 	messageInputChan := make(chan *discordgo.Message)
@@ -824,45 +750,31 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		window.userList.internalTreeView.SetSearchOnTypeEnabled(true)
 		window.privateList.internalTreeView.SetSearchOnTypeEnabled(true)
 	} else if config.Current.OnTypeInListBehaviour == config.FocusMessageInputOnTypeInList {
-		guildList.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
-		channelTree.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
-		window.userList.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
-		window.privateList.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
-		window.chatView.internalTextView.SetInputCapture(tviewutil.CreateFocusTextViewOnTypeInputHandler(
-			window.app, window.messageInput.internalTextView))
+		focusTextViewOnTypeInputHandler := tviewutil.CreateFocusTextViewOnTypeInputHandler(
+			window.app, window.messageInput.internalTextView)
+		guildList.SetInputCapture(focusTextViewOnTypeInputHandler)
+		channelTree.SetInputCapture(focusTextViewOnTypeInputHandler)
+		window.userList.SetInputCapture(focusTextViewOnTypeInputHandler)
+		window.privateList.SetInputCapture(focusTextViewOnTypeInputHandler)
+		window.chatView.internalTextView.SetInputCapture(focusTextViewOnTypeInputHandler)
 	}
 
-	//Guild Container arrow key navigation. Please end my life.
-	oldGuildListHandler := guildList.GetInputCapture()
 	newGuildHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyDown || event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.channelTree)
-				return nil
-			}
-
-			if event.Key() == tcell.KeyLeft {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					window.app.SetFocus(window.chatView.internalTextView)
+		if shortcuts.GuildListMarkRead.Equals(event) {
+			selectedGuildNode := guildList.GetCurrentNode()
+			if selectedGuildNode != nil && !readstate.HasGuildBeenRead(selectedGuildNode.GetReference().(string)) {
+				ackError := window.session.GuildMessageAck(selectedGuildNode.GetReference().(string))
+				if ackError != nil {
+					window.ShowErrorDialog(ackError.Error())
 				}
-				return nil
 			}
-
-			if event.Key() == tcell.KeyRight {
-				window.app.SetFocus(window.chatView.internalTextView)
-				return nil
-			}
+			return nil
 		}
 
 		return event
 	}
 
+	oldGuildListHandler := guildList.GetInputCapture()
 	if oldGuildListHandler == nil {
 		guildList.SetInputCapture(newGuildHandler)
 	} else {
@@ -876,41 +788,22 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		})
 	}
 
-	//Channel Container arrow key navigation. Please end my life.
-	oldChannelListHandler := channelTree.GetInputCapture()
 	newChannelListHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyDown || event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.guildList)
-				return nil
-			}
-
-			if event.Key() == tcell.KeyLeft {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					if window.commandMode {
-						window.app.SetFocus(window.commandView.commandOutput)
-					} else {
-						window.app.SetFocus(window.messageInput.GetPrimitive())
-					}
+		if shortcuts.ChannelTreeMarkRead.Equals(event) {
+			selectedChannelNode := channelTree.GetCurrentNode()
+			if selectedChannelNode != nil {
+				ackError := discordutil.AcknowledgeChannel(window.session, selectedChannelNode.GetReference().(string))
+				if ackError != nil {
+					window.ShowErrorDialog(ackError.Error())
 				}
-				return nil
 			}
-
-			if event.Key() == tcell.KeyRight {
-				if window.commandMode {
-					window.app.SetFocus(window.commandView.commandOutput)
-				} else {
-					window.app.SetFocus(window.messageInput.GetPrimitive())
-				}
-				return nil
-			}
+			return nil
 		}
 
 		return event
 	}
 
+	oldChannelListHandler := channelTree.GetInputCapture()
 	if oldChannelListHandler == nil {
 		channelTree.SetInputCapture(newChannelListHandler)
 	} else {
@@ -924,205 +817,27 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		})
 	}
 
-	//Chatview arrow key navigation. Please end my life.
-	oldChatViewHandler := window.chatView.internalTextView.GetInputCapture()
-	newChatViewHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyDown {
-				window.app.SetFocus(window.messageInput.GetPrimitive())
-				return nil
-			}
-
-			if event.Key() == tcell.KeyUp {
-				if window.commandMode {
-					window.app.SetFocus(window.commandView.commandInput.internalTextView)
-				} else {
-					window.app.SetFocus(window.messageInput.GetPrimitive())
-				}
-				return nil
-			}
-
-			if event.Key() == tcell.KeyLeft {
-				if window.activeView == Guilds {
-					window.app.SetFocus(window.guildList)
-					return nil
-				} else if window.activeView == Guilds {
-					window.app.SetFocus(window.privateList.internalTreeView)
-					return nil
-				}
-			}
-
-			if event.Key() == tcell.KeyRight {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					if window.activeView == Guilds {
-						window.app.SetFocus(window.guildList)
-						return nil
-					} else if window.activeView == Guilds {
-						window.app.SetFocus(window.privateList.internalTreeView)
-						return nil
-					}
-				}
-				return nil
-			}
-		}
-
-		return event
-	}
-
-	if oldChatViewHandler == nil {
-		window.chatView.internalTextView.SetInputCapture(newChatViewHandler)
-	} else {
-		window.chatView.internalTextView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-			handledEvent := newChatViewHandler(event)
-			if handledEvent != nil {
-				return oldChatViewHandler(event)
-			}
-
-			return event
-		})
-	}
-
-	//User Container arrow key navigation. Please end my life.
-	oldUserListHandler := window.userList.internalTreeView.GetInputCapture()
-	newUserListHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyRight {
-				if window.activeView == Guilds {
-					window.app.SetFocus(window.guildList)
-					return nil
-				} else if window.activeView == Guilds {
-					window.app.SetFocus(window.privateList.internalTreeView)
-					return nil
-				}
-				return nil
-			}
-			if event.Key() == tcell.KeyLeft {
-				window.app.SetFocus(window.chatView.GetPrimitive())
-				return nil
-			}
-		}
-
-		return event
-	}
-
-	if oldUserListHandler == nil {
-		window.userList.internalTreeView.SetInputCapture(newUserListHandler)
-	} else {
-		window.userList.internalTreeView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-			handledEvent := newUserListHandler(event)
-			if handledEvent != nil {
-				return oldUserListHandler(event)
-			}
-
-			return event
-		})
-	}
-
-	//Private Container arrow key navigation. Please end my life.
-	oldPrivateListHandler := window.privateList.internalTreeView.GetInputCapture()
-	newPrivateListHandler := func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyLeft {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					window.app.SetFocus(window.chatView.internalTextView)
-				}
-				return nil
-			}
-
-			if event.Key() == tcell.KeyRight {
-				window.app.SetFocus(window.chatView.internalTextView)
-				return nil
-			}
-		}
-
-		return event
-	}
-
-	if oldPrivateListHandler == nil {
-		window.privateList.internalTreeView.SetInputCapture(newPrivateListHandler)
-	} else {
-		window.privateList.internalTreeView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-			handledEvent := newPrivateListHandler(event)
-			if handledEvent != nil {
-				return oldPrivateListHandler(event)
-			}
-
-			return event
-		})
-	}
-
 	window.session.AddHandler(func(s *discordgo.Session, event *discordgo.MessageAck) {
-		if readstate.UpdateReadLocal(event.ChannelID, event.MessageID) {
-			channel, stateError := s.State.Channel(event.ChannelID)
-			if stateError == nil && event.MessageID == channel.LastMessageID {
-				if channel.GuildID == "" {
-					window.privateList.MarkChannelAsRead(channel.ID)
-				} else {
-					if window.selectedGuild != nil && channel.GuildID == window.selectedGuild.ID {
-						window.channelTree.MarkChannelAsRead(channel.ID)
+		window.app.QueueUpdateDraw(func() {
+			if readstate.UpdateReadLocal(event.ChannelID, event.MessageID) {
+				channel, stateError := s.State.Channel(event.ChannelID)
+				if stateError == nil && event.MessageID == channel.LastMessageID {
+					if channel.GuildID == "" {
+						if window.selectedChannel != nil || window.selectedChannel.ID != channel.ID {
+							window.privateList.MarkAsRead(channel.ID)
+						}
 					} else {
-						for _, guildNode := range window.guildList.GetRoot().GetChildren() {
-							if guildNode.GetReference() == channel.GuildID {
-								window.updateServerReadStatus(guildNode, false)
-								break
+						if window.selectedGuild != nil && channel.GuildID == window.selectedGuild.ID {
+							if window.selectedChannel != nil || window.selectedChannel.ID != channel.ID {
+								window.channelTree.MarkAsRead(channel.ID)
 							}
+						} else {
+							window.updateServerReadStatus(channel.GuildID, false)
 						}
 					}
 				}
 			}
-		}
-	})
-
-	window.commandView.SetInputCaptureForInput(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.commandView.commandOutput)
-			} else if event.Key() == tcell.KeyDown {
-				window.app.SetFocus(window.chatView.GetPrimitive())
-			} else if event.Key() == tcell.KeyRight {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					window.app.SetFocus(window.channelTree)
-				}
-			} else if event.Key() == tcell.KeyLeft {
-				window.app.SetFocus(window.channelTree)
-			} else {
-				return event
-			}
-
-			return nil
-		}
-
-		return event
-	})
-
-	window.commandView.SetInputCaptureForOutput(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Modifiers() == tcell.ModAlt {
-			if event.Key() == tcell.KeyUp {
-				window.app.SetFocus(window.messageInput.GetPrimitive())
-			} else if event.Key() == tcell.KeyDown {
-				window.app.SetFocus(window.commandView.commandInput.GetPrimitive())
-			} else if event.Key() == tcell.KeyRight {
-				if window.userList.internalTreeView.IsVisible() {
-					window.app.SetFocus(window.userList.internalTreeView)
-				} else {
-					window.app.SetFocus(window.channelTree)
-				}
-			} else if event.Key() == tcell.KeyLeft {
-				window.app.SetFocus(window.channelTree)
-			} else {
-				return event
-			}
-
-			return nil
-		}
-
-		return event
+		})
 	})
 
 	window.middleContainer = tview.NewFlex().
@@ -1148,12 +863,15 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 	window.rootContainer.AddItem(window.dialogReplacement, 2, 0, false)
 
 	if config.Current.ShowBottomBar {
-		bottomBar := NewBottomBar(session.State.User.Username)
+		bottomBar := NewBottomBar()
+		bottomBar.AddItem(fmt.Sprintf("Logged in as: '%s'", tviewutil.Escape(session.State.User.Username)))
+		bottomBar.AddItem(fmt.Sprintf("View / Change shortcuts: %s", shortcutdialog.EventToString(shortcutsDialogShortcut)))
 		window.rootContainer.AddItem(bottomBar, 1, 0, false)
 	}
 
-	app.SetRoot(window.rootContainer, true)
+	window.rootContainer.SetInputCapture(window.handleChatWindowShortcuts)
 	app.SetInputCapture(window.handleGlobalShortcuts)
+	app.SetRoot(window.rootContainer, true)
 
 	if config.Current.UseFixedLayout {
 		window.middleContainer.AddItem(window.leftArea, config.Current.FixedSizeLeft, 0, true)
@@ -1164,6 +882,7 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 		window.middleContainer.AddItem(window.chatArea, 0, 20, false)
 		window.middleContainer.AddItem(window.userList.internalTreeView, 0, 6, false)
 	}
+	window.updateUserList()
 
 	autocompleteView.SetVisible(false)
 	autocompleteView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -1187,9 +906,44 @@ func NewWindow(doRestart chan bool, app *tview.Application, session *discordgo.S
 
 	window.SwitchToGuildsPage()
 
+	window.messageInput.internalTextView.SetNextFocusableComponents(tview.Up, window.chatView.internalTextView)
+	window.messageInput.internalTextView.SetNextFocusableComponents(tview.Down, window.commandView.commandOutput, window.chatView.internalTextView)
+	window.messageInput.internalTextView.SetNextFocusableComponents(tview.Right, window.userList.internalTreeView, window.channelTree, window.privateList.internalTreeView)
+	window.messageInput.internalTextView.SetNextFocusableComponents(tview.Left, window.channelTree, window.privateList.internalTreeView)
+
+	window.channelTree.SetNextFocusableComponents(tview.Up, window.guildList)
+	window.channelTree.SetNextFocusableComponents(tview.Down, window.guildList)
+	window.channelTree.SetNextFocusableComponents(tview.Left, window.userList.internalTreeView, window.commandView.commandOutput, window.messageInput.GetPrimitive())
+	window.channelTree.SetNextFocusableComponents(tview.Right, window.commandView.commandOutput, window.messageInput.GetPrimitive())
+
+	window.guildList.SetNextFocusableComponents(tview.Up, window.channelTree)
+	window.guildList.SetNextFocusableComponents(tview.Down, window.channelTree)
+	window.guildList.SetNextFocusableComponents(tview.Left, window.userList.internalTreeView, window.chatView.GetPrimitive())
+	window.guildList.SetNextFocusableComponents(tview.Right, window.chatView.GetPrimitive(), window.userList.internalTreeView)
+
+	window.privateList.internalTreeView.SetNextFocusableComponents(tview.Right, window.chatView.GetPrimitive())
+	window.privateList.internalTreeView.SetNextFocusableComponents(tview.Left, window.userList.internalTreeView, window.chatView.GetPrimitive())
+
+	window.userList.internalTreeView.SetNextFocusableComponents(tview.Left, window.chatView.GetPrimitive())
+
+	window.chatView.internalTextView.SetNextFocusableComponents(tview.Down, window.messageInput.GetPrimitive())
+	window.chatView.internalTextView.SetNextFocusableComponents(tview.Up, window.commandView.commandInput.internalTextView, window.messageInput.GetPrimitive())
+
+	window.commandView.commandInput.internalTextView.SetNextFocusableComponents(tview.Up, window.commandView.commandOutput)
+	window.commandView.commandInput.internalTextView.SetNextFocusableComponents(tview.Down, window.chatView.GetPrimitive())
+	window.commandView.commandInput.internalTextView.SetNextFocusableComponents(tview.Right, window.userList.internalTreeView, window.channelTree, window.privateList.internalTreeView)
+	window.commandView.commandInput.internalTextView.SetNextFocusableComponents(tview.Left, window.channelTree, window.privateList.internalTreeView)
+
+	window.commandView.commandOutput.SetNextFocusableComponents(tview.Up, window.messageInput.GetPrimitive())
+	window.commandView.commandOutput.SetNextFocusableComponents(tview.Down, window.commandView.commandInput.GetPrimitive())
+	window.commandView.commandOutput.SetNextFocusableComponents(tview.Right, window.userList.internalTreeView, window.channelTree, window.privateList.internalTreeView)
+	window.commandView.commandOutput.SetNextFocusableComponents(tview.Left, window.channelTree, window.privateList.internalTreeView)
+
 	app.SetFocus(guildList)
 
-	window.registerMouseFocusListeners()
+	if config.Current.MouseEnabled {
+		window.registerMouseFocusListeners()
+	}
 
 	window.chatView.internalTextView.SetText(getWelcomeText())
 
@@ -1203,6 +957,32 @@ Welcome to version %s of Cordless. Below you can see the most
 important changes of the last two versions officially released.
 
 [::b]THIS VERSION
+	- Features
+		- DM people via "p" in the chatview or use the dm-open command
+		- Mark guilds as read
+		- Mark guild channels as read
+		- Write to logfile by setting "--log"
+		- Mentions are now displayed in the guild list
+		- You can now bulk send folders and files
+	- Changes
+		- Dialogs shown at the bottom of the chatview now allow tab / backtab
+		- There's now a double-colon to separate author and messages
+		- There's more customizable shortcuts now
+	- Bugfixes
+		- Guilds and channels were sometimes falsely seen as muted
+		- Deleting / Leaving guilds now properly deletes them from the UI
+		- Jumping to guilds / channels you were mentioned in, now works by
+		  by typing their name again
+		- Fixed deadlock when spamming "Switch to previous channel"
+		- "Switch to previous channel" doesn't jumble the state anymore
+		  when switching between different guilds and DMs
+		- Muted guilds, channels and categories shouldn't be displayed as
+		  unread anymore
+		- @everyone works again, so you can piss of others again
+		- Messages containing links won't disappear anymore after sending
+		- Messages from blocked users won't trigger notifications anymore
+		- No more spammed empty error messages when receiving notifications
+[::b]2020-08-30
 	- Features
 		- Nicknames can now be disabled via the configuration
 		- Files from messages can now be downloaded (key d) or opened (key o)
@@ -1327,9 +1107,39 @@ func (window *Window) initExtensionEngine(engine scripting.Engine) error {
 	return nil
 }
 
-func (window *Window) loadPrivateChannel(channel *discordgo.Channel) {
+// OpenDirectMessage creates a new chat with the given user or loads an
+// already existing one. On success, the channel is loaded.
+func (window *Window) OpenDirectMessage(userID string) error {
+	//Can't message yourself, goon!
+	if userID == window.session.State.User.ID {
+		return nil
+	}
+
+	window.chatView.Lock()
+	defer window.chatView.Unlock()
+
+	//If there's an existing channel, we use that and avoid unnecessary traffic.
+	existingChannel := discordutil.FindDMChannelWithUser(window.session.State, userID)
+	if existingChannel != nil {
+		window.SwitchToPrivateChannel(existingChannel)
+		return nil
+	}
+
+	newChannel, createError := window.session.UserChannelCreate(userID)
+	if createError != nil {
+		return createError
+	}
+
+	window.SwitchToPrivateChannel(newChannel)
+	return nil
+}
+
+// SwitchToPrivateChannel switches to the friends page, loads the given channel
+// and then focuses the input primitive.
+func (window *Window) SwitchToPrivateChannel(channel *discordgo.Channel) {
+	window.SwitchToFriendsPage()
+	window.app.SetFocus(window.messageInput.GetPrimitive())
 	window.LoadChannel(channel)
-	window.RefreshLayout()
 }
 
 func (window *Window) insertNewLineAtCursor() {
@@ -1340,10 +1150,28 @@ func (window *Window) insertNewLineAtCursor() {
 	})
 }
 
+// IsCursorInsideCodeBlock checks if the cursor comes after three backticks
+// that don't have another 3 backticks following after them.
 func (window *Window) IsCursorInsideCodeBlock() bool {
-	left := window.messageInput.GetTextLeftOfSelection()
-	leftSplit := strings.Split(left, "```")
-	return len(leftSplit)%2 == 0
+	var backtickCount int
+	var foundUnclosedBackticks bool
+	for _, char := range window.messageInput.GetTextLeftOfSelection() {
+		if char == '`' {
+			backtickCount++
+		} else {
+			backtickCount = 0
+		}
+
+		if backtickCount == 3 {
+			if foundUnclosedBackticks {
+				foundUnclosedBackticks = false
+			} else {
+				foundUnclosedBackticks = true
+			}
+		}
+	}
+
+	return foundUnclosedBackticks
 }
 
 func getUsernameForQuote(state *discordgo.State, message *discordgo.Message) string {
@@ -1396,6 +1224,37 @@ func (window *Window) TrySendMessage(targetChannel *discordgo.Channel, message s
 		return
 	}
 
+	if window.editingMessageID != nil {
+		window.editMessage(targetChannel.ID, *window.editingMessageID, message)
+		return
+	}
+
+	if strings.HasPrefix(message, "file://") {
+		window.app.QueueUpdateDraw(func() {
+			yesButton := "Yes"
+			window.ShowDialog(config.GetTheme().PrimitiveBackgroundColor, "Resolve filepath and send a file instead?", func(button string) {
+				if button == yesButton {
+					window.messageInput.SetText("")
+					go func() {
+						sendError := discordutil.ResolveFilePathAndSendFile(window.session, message, targetChannel.ID)
+						if sendError != nil {
+							window.app.QueueUpdateDraw(func() {
+								window.ShowErrorDialog(sendError.Error())
+							})
+						}
+					}()
+				} else {
+					window.sendMessageWithLengthCheck(targetChannel, message)
+				}
+			}, yesButton, "No")
+		})
+		return
+	}
+
+	window.sendMessageWithLengthCheck(targetChannel, message)
+}
+
+func (window *Window) sendMessageWithLengthCheck(targetChannel *discordgo.Channel, message string) {
 	message = window.prepareMessage(targetChannel, message)
 	overlength := len(message) - 2000
 	if overlength > 0 {
@@ -1409,11 +1268,6 @@ func (window *Window) TrySendMessage(targetChannel *discordgo.Channel, message s
 					}
 				}, sendAsFile, "Nothing")
 		})
-		return
-	}
-
-	if window.editingMessageID != nil {
-		window.editMessage(targetChannel.ID, *window.editingMessageID, message)
 		return
 	}
 
@@ -1464,9 +1318,12 @@ func (window *Window) sendMessage(targetChannelID, message string) {
 	}
 }
 
-func (window *Window) updateServerReadStatus(guildNode *tview.TreeNode, isSelected bool) {
-	window.guildList.UpdateNodeState(guildNode, isSelected)
-	window.guildList.UpdateUnreadGuildCount()
+func (window *Window) updateServerReadStatus(guildID string, isSelected bool) {
+	guild, cacheError := window.session.State.Guild(guildID)
+	if cacheError == nil {
+		window.guildList.UpdateNodeStateByGuild(guild, isSelected)
+		window.guildList.UpdateUnreadGuildCount()
+	}
 }
 
 // prepareMessage prepares a message for being sent to the discord API.
@@ -1615,7 +1472,7 @@ func (window *Window) ShowDialog(color tcell.Color, text string, buttonHandler f
 
 		indexCopy := index
 		newButton.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-			if event.Key() == tcell.KeyRight {
+			if event.Key() == tcell.KeyRight || event.Key() == tcell.KeyTab {
 				if len(buttonWidgets) <= indexCopy+1 {
 					window.app.SetFocus(buttonWidgets[0])
 				} else {
@@ -1624,7 +1481,7 @@ func (window *Window) ShowDialog(color tcell.Color, text string, buttonHandler f
 				return nil
 			}
 
-			if event.Key() == tcell.KeyLeft {
+			if event.Key() == tcell.KeyLeft || event.Key() == tcell.KeyBacktab {
 				if indexCopy == 0 {
 					window.app.SetFocus(buttonWidgets[len(buttonWidgets)-1])
 				} else {
@@ -1796,11 +1653,13 @@ func (window *Window) startMessageHandlerRoutines(input, edit, delete chan *disc
 	go func() {
 		for tempMessage := range input {
 			message := tempMessage
-			go func() {
-				for _, engine := range window.extensionEngines {
-					engine.OnMessageReceive(message)
-				}
-			}()
+			if len(window.extensionEngines) > 0 {
+				go func() {
+					for _, engine := range window.extensionEngines {
+						engine.OnMessageReceive(message)
+					}
+				}()
+			}
 
 			channel, stateError := window.session.State.Channel(message.ChannelID)
 			if stateError != nil {
@@ -1821,14 +1680,9 @@ func (window *Window) startMessageHandlerRoutines(input, edit, delete chan *disc
 
 			if channel.Type == discordgo.ChannelTypeGuildText && (window.selectedGuild == nil ||
 				window.selectedGuild.ID != channel.GuildID) {
-				for _, guildNode := range window.guildList.GetRoot().GetChildren() {
-					if guildNode.GetReference() == channel.GuildID {
-						window.app.QueueUpdateDraw(func() {
-							window.updateServerReadStatus(guildNode, false)
-						})
-						break
-					}
-				}
+				window.app.QueueUpdateDraw(func() {
+					window.updateServerReadStatus(channel.GuildID, false)
+				})
 			}
 
 			// TODO,HACK.FIXME Since the cache is inconsistent, I have to
@@ -1841,10 +1695,10 @@ func (window *Window) startMessageHandlerRoutines(input, edit, delete chan *disc
 				//FIXME Useful to use locking here?
 				if window.activeView == Dms {
 					window.app.QueueUpdateDraw(func() {
-						window.privateList.ReorderChannelList()
+						window.privateList.Reorder()
 					})
 				} else {
-					window.privateList.ReorderChannelList()
+					window.privateList.Reorder()
 				}
 			}
 
@@ -1853,61 +1707,31 @@ func (window *Window) startMessageHandlerRoutines(input, edit, delete chan *disc
 				continue
 			}
 
-			isCurrentChannel := window.selectedChannel == nil || message.ChannelID != window.selectedChannel.ID
-			mentionsCurrentUser := discordutil.MentionsCurrentUserExplicitly(window.session.State, message)
-			if config.Current.DesktopNotifications &&
-				(mentionsCurrentUser ||
-					//Always show notification for private messages
-					channel.Type == discordgo.ChannelTypeDM || channel.Type == discordgo.ChannelTypeGroupDM) &&
-				(!isCurrentChannel ||
-					(config.Current.DesktopNotificationsForLoadedChannel && !window.userActive)) {
-
-				var notificationLocation string
-				if channel.Type == discordgo.ChannelTypeDM {
-					notificationLocation = message.Author.Username
-				} else if channel.Type == discordgo.ChannelTypeGroupDM {
-					notificationLocation = channel.Name
-					if notificationLocation == "" {
-						for index, recipient := range channel.Recipients {
-							if index == 0 {
-								notificationLocation = recipient.Username
-							} else {
-								notificationLocation = fmt.Sprintf("%s, %s", notificationLocation, recipient.Username)
-							}
-						}
-					}
-
-					notificationLocation = message.Author.Username + " - " + notificationLocation
-				} else if channel.Type == discordgo.ChannelTypeGuildText {
-					guild, cacheError := window.session.State.Guild(message.GuildID)
-					if guild != nil && cacheError == nil {
-						notificationLocation = fmt.Sprintf("%s - %s - %s", guild.Name, channel.Name, message.Author.Username)
-					} else {
-						notificationLocation = fmt.Sprintf("%s - %s", message.Author.Username, channel.Name)
-					}
-				}
-
-				notifyError := beeep.Notify("Cordless - "+notificationLocation, message.ContentWithMentionsReplaced(), "assets/information.png")
+			if config.Current.DesktopNotifications {
+				notifyError := window.handleNotification(message, channel)
 				if notifyError != nil {
 					log.Printf("["+tviewutil.ColorToHex(config.GetTheme().ErrorColor)+"]Error sending notification:\n\t[%s]%s\n", tviewutil.ColorToHex(config.GetTheme().ErrorColor), notifyError)
 				}
 			}
 
-			if isCurrentChannel {
+			if window.selectedChannel == nil || message.ChannelID != window.selectedChannel.ID {
 				if channel.Type == discordgo.ChannelTypeDM || channel.Type == discordgo.ChannelTypeGroupDM {
 					if !readstate.IsPrivateChannelMuted(channel) {
 						window.app.QueueUpdateDraw(func() {
-							window.privateList.MarkChannelAsUnread(channel)
+							window.privateList.MarkAsUnread(channel.ID)
 						})
 					}
 				} else if channel.Type == discordgo.ChannelTypeGuildText {
-					if mentionsCurrentUser {
+					if discordutil.MentionsCurrentUserExplicitly(window.session.State, message) {
+						readstate.MarkAsMentioned(channel.ID)
 						window.app.QueueUpdateDraw(func() {
-							window.channelTree.MarkChannelAsMentioned(channel.ID)
+							isCurrentGuild := window.selectedGuild != nil && window.selectedGuild.ID == channel.GuildID
+							window.updateServerReadStatus(channel.GuildID, isCurrentGuild)
+							window.channelTree.MarkAsMentioned(channel.ID)
 						})
 					} else if !readstate.IsGuildChannelMuted(channel) {
 						window.app.QueueUpdateDraw(func() {
-							window.channelTree.MarkChannelAsUnread(channel.ID)
+							window.channelTree.MarkAsUnread(channel.ID)
 						})
 					}
 				}
@@ -1919,11 +1743,13 @@ func (window *Window) startMessageHandlerRoutines(input, edit, delete chan *disc
 		for messageDeleted := range delete {
 			tempMessageDeleted := messageDeleted
 
-			go func() {
-				for _, engine := range window.extensionEngines {
-					engine.OnMessageDelete(tempMessageDeleted)
-				}
-			}()
+			if len(window.extensionEngines) > 0 {
+				go func() {
+					for _, engine := range window.extensionEngines {
+						engine.OnMessageDelete(tempMessageDeleted)
+					}
+				}()
+			}
 			window.chatView.Lock()
 			if window.selectedChannel != nil && window.selectedChannel.ID == tempMessageDeleted.ChannelID {
 				window.QueueUpdateDrawSynchronized(func() {
@@ -1948,27 +1774,38 @@ func (window *Window) startMessageHandlerRoutines(input, edit, delete chan *disc
 	}()
 
 	go func() {
+	MESSAGE_EDIT_LOOP:
 		for messageEdited := range edit {
 			tempMessageEdited := messageEdited
-			go func() {
-				for _, engine := range window.extensionEngines {
-					engine.OnMessageEdit(tempMessageEdited)
-				}
-			}()
+			if len(window.extensionEngines) > 0 {
+				go func() {
+					for _, engine := range window.extensionEngines {
+						engine.OnMessageEdit(tempMessageEdited)
+					}
+				}()
+			}
 			window.chatView.Lock()
 			if window.selectedChannel != nil && window.selectedChannel.ID == tempMessageEdited.ChannelID {
 				for _, message := range window.chatView.data {
 					if message.ID == tempMessageEdited.ID {
 						//FIXME Workaround for the fact that discordgo doesn't update already filled fields.
-						message.Content = tempMessageEdited.Content
+
+						//FIXME Workaround for the workaround, since discord appears to not send the content
+						//again for messages that have only had an embed added. In that situation, the
+						//timestamp for editing will also not be set, therefore we can circumvent this issue.
+						if tempMessageEdited.EditedTimestamp != "" && tempMessageEdited.Content != "" {
+							message.Content = tempMessageEdited.Content
+						}
+
 						message.Mentions = tempMessageEdited.Mentions
 						message.MentionRoles = tempMessageEdited.MentionRoles
 						message.MentionEveryone = tempMessageEdited.MentionEveryone
 
 						window.QueueUpdateDrawSynchronized(func() {
+							defer window.chatView.Unlock()
 							window.chatView.UpdateMessage(message)
 						})
-						break
+						continue MESSAGE_EDIT_LOOP
 					}
 				}
 			}
@@ -2022,31 +1859,26 @@ func (window *Window) registerGuildHandlers() {
 
 	go func() {
 		for guildRemove := range guildRemoveChannel {
-			if window.selectedGuildNode == nil {
-				continue
-			}
-
-			if window.previousGuildNode != nil && window.previousGuildNode.GetReference() == guildRemove.ID {
-				window.previousGuildNode = nil
-				window.previousGuild = nil
-				window.previousChannelNode = nil
+			if window.previousChannel != nil && window.previousChannel.GuildID == guildRemove.ID {
 				window.previousChannel = nil
 			}
 
-			if window.selectedGuildNode.GetReference() == guildRemove.ID {
-				guildID := guildRemove.ID
+			guildID := guildRemove.ID
+			window.guildList.RemoveGuild(guildID)
+
+			selectedGuild := window.selectedGuild
+			if selectedGuild != nil && selectedGuild.ID == guildID {
 				window.app.QueueUpdateDraw(func() {
 					if window.selectedChannel != nil && window.selectedChannel.GuildID == guildID {
-						window.chatView.ClearViewAndCache()
-						window.selectedChannel = nil
-						window.selectedChannelNode = nil
+						window.UnloadChannel()
+						//Unload channel sets the selectedChannel as the previous
+						//one, which isn't correct.
+						window.previousChannel = nil
 					}
 
 					window.channelTree.Clear()
-					window.userList.Clear()
-					window.guildList.RemoveGuild(guildID)
-					window.selectedGuildNode = nil
 					window.selectedGuild = nil
+					window.updateUserList()
 				})
 			}
 		}
@@ -2174,16 +2006,12 @@ func (window *Window) registerGuildChannelHandler() {
 
 	window.session.AddHandler(func(s *discordgo.Session, event *discordgo.ChannelDelete) {
 		if window.isChannelEventRelevant(event.Channel) {
-			if window.previousChannelNode != nil && window.previousChannelNode.GetReference() == event.ID {
-				window.previousGuildNode = nil
-				window.previousGuild = nil
-				window.previousChannelNode = nil
+			if window.previousChannel != nil && window.previousChannel.ID == event.ID {
 				window.previousChannel = nil
 			}
 
-			if window.selectedChannelNode != nil && window.selectedChannelNode.GetReference() == event.ID {
+			if window.selectedChannel != nil && window.selectedChannel.ID == event.ID {
 				window.selectedChannel = nil
-				window.selectedChannelNode = nil
 				window.app.QueueUpdateDraw(func() {
 					window.chatView.ClearViewAndCache()
 				})
@@ -2198,6 +2026,51 @@ func (window *Window) registerGuildChannelHandler() {
 			})
 		}
 	})
+}
+
+func (window *Window) isElligibleForNotification(message *discordgo.Message, channel *discordgo.Channel) bool {
+	if discordutil.IsBlocked(window.session.State, message.Author) {
+		return false
+	}
+
+	isCurrentChannel := window.selectedChannel == nil || message.ChannelID != window.selectedChannel.ID
+	//Client is not in a state elligible for notifications.
+	if isCurrentChannel && (window.userActive || !config.Current.DesktopNotificationsForLoadedChannel) {
+		return false
+	}
+
+	isPrivateChannel := channel.Type == discordgo.ChannelTypeDM || channel.Type == discordgo.ChannelTypeGroupDM
+	mentionsCurrentUser := discordutil.MentionsCurrentUserExplicitly(window.session.State, message)
+	//We always show notification for private messages, no matter whether
+	//the user was explicitly mentioned.
+	if !isPrivateChannel && !mentionsCurrentUser {
+		return false
+	}
+
+	return true
+}
+
+func (window *Window) handleNotification(message *discordgo.Message, channel *discordgo.Channel) error {
+	if !window.isElligibleForNotification(message, channel) {
+		return nil
+	}
+
+	var notificationLocation string
+	if channel.Type == discordgo.ChannelTypeDM {
+		notificationLocation = message.Author.Username
+	} else if channel.Type == discordgo.ChannelTypeGroupDM {
+		notificationLocation = message.Author.Username + " - " +
+			discordutil.GetPrivateChannelNameUnescaped(channel)
+	} else if channel.Type == discordgo.ChannelTypeGuildText {
+		guild, cacheError := window.session.State.Guild(message.GuildID)
+		if guild != nil && cacheError == nil {
+			notificationLocation = fmt.Sprintf("%s - %s - %s", guild.Name, channel.Name, message.Author.Username)
+		} else {
+			notificationLocation = fmt.Sprintf("%s - %s", message.Author.Username, channel.Name)
+		}
+	}
+
+	return beeep.Notify("Cordless - "+notificationLocation, message.ContentWithMentionsReplaced(), "assets/information.png")
 }
 
 func (window *Window) askForMessageDeletion(messageID string, usedWithSelection bool) {
@@ -2237,32 +2110,28 @@ func (window *Window) handleGlobalShortcuts(event *tcell.EventKey) *tcell.EventK
 		window.userActiveTimer.Reset(time.Duration(config.Current.DesktopNotificationsUserInactivityThreshold) * time.Second)
 	}
 
+	return event
+}
+
+func (window *Window) handleChatWindowShortcuts(event *tcell.EventKey) *tcell.EventKey {
+	if window.dialogReplacement.IsVisible() {
+		//Delegate to focused component which is the dialog.
+		//We do this, cause we don't want people to focus anything else than
+		//the dialog.
+		return event
+	}
+
+	if shortcuts.DirectionalFocusHandling(event, window.app) == nil {
+		return nil
+	}
+
 	if shortcuts.ToggleBareChat.Equals(event) {
 		window.toggleBareChat()
-		return nil
-	}
-
-	//This two have to work in baremode as well, since otherwise only the mouse
-	//can be used for focus switching, which sucks in a terminal app.
-	if shortcuts.FocusMessageInput.Equals(event) {
+	} else if shortcuts.FocusMessageInput.Equals(event) {
 		window.app.SetFocus(window.messageInput.GetPrimitive())
-		return nil
-	}
-
-	if shortcuts.FocusMessageContainer.Equals(event) {
+	} else if shortcuts.FocusMessageContainer.Equals(event) {
 		window.app.SetFocus(window.chatView.internalTextView)
-		return nil
-	}
-
-	if window.app.GetRoot() != window.rootContainer {
-		return event
-	}
-
-	if window.dialogReplacement.IsVisible() {
-		return event
-	}
-
-	if shortcuts.EventsEqual(event, shortcutsDialogShortcut) {
+	} else if shortcuts.EventsEqual(event, shortcutsDialogShortcut) {
 		shortcutdialog.ShowShortcutsDialog(window.app, func() {
 			window.app.SetRoot(window.rootContainer, true)
 			window.app.ForceDraw()
@@ -2316,25 +2185,10 @@ func (window *Window) handleGlobalShortcuts(event *tcell.EventKey) *tcell.EventK
 
 func (window *Window) toggleUserContainer() {
 	config.Current.ShowUserContainer = !config.Current.ShowUserContainer
-
-	if !config.Current.ShowUserContainer && window.app.GetFocus() == window.userList.internalTreeView {
-		window.app.SetFocus(window.messageInput.GetPrimitive())
-	}
-
-	if config.Current.ShowUserContainer {
-		if !window.userList.IsLoaded() {
-			if window.selectedChannel != nil && window.selectedChannel.GuildID == "" {
-				window.userList.LoadGroup(window.selectedChannel.ID)
-			} else if window.selectedGuild != nil {
-				window.userList.LoadGuild(window.selectedGuild.ID)
-			}
-		}
-	} else {
-		window.userList.Clear()
-	}
-
 	config.PersistConfig()
-	window.RefreshLayout()
+	window.updateUserList()
+	//Solves https://github.com/Bios-Marcel/cordless/issues/246
+	window.chatView.Reprint()
 }
 
 // toggleBareChat will display only the chatview as the fullscreen application
@@ -2343,13 +2197,19 @@ func (window *Window) toggleBareChat() {
 	window.bareChat = !window.bareChat
 	if window.bareChat {
 		window.chatView.internalTextView.SetBorderSides(true, false, true, false)
-		previousFocus := window.app.GetFocus()
-		//Initially this should be gone. Maybe we'll allow reacessing it at some point.
+		window.commandView.commandOutput.SetBorderSides(true, false, true, false)
+
+		//Initially this should be gone. Reaccessing it with the normal
+		//shortcut is possible though.
 		window.SetCommandModeEnabled(false)
+
+		previousFocus := window.app.GetFocus()
 		window.app.SetRoot(window.chatArea, true)
 		window.app.SetFocus(previousFocus)
 	} else {
 		window.chatView.internalTextView.SetBorderSides(true, true, true, true)
+		window.commandView.commandOutput.SetBorderSides(true, true, true, true)
+
 		window.app.SetRoot(window.rootContainer, true)
 		window.app.SetFocus(window.messageInput.GetPrimitive())
 	}
@@ -2485,7 +2345,7 @@ func (window *Window) startEditingMessage(message *discordgo.Message) {
 		window.messageInput.SetText(message.Content)
 		window.messageInput.SetBorderColor(tcell.ColorYellow)
 		window.messageInput.SetBorderFocusColor(tcell.ColorYellow)
-		if vtxxx {
+		if tview.IsVtxxx {
 			window.messageInput.SetBorderFocusAttributes(tcell.AttrBlink | tcell.AttrBold)
 		}
 		window.editingMessageID = &message.ID
@@ -2494,15 +2354,17 @@ func (window *Window) startEditingMessage(message *discordgo.Message) {
 }
 
 func (window *Window) exitMessageEditMode() {
-	window.exitMessageEditModeAndKeepText()
-	window.messageInput.SetText("")
+	if window.editingMessageID != nil {
+		window.exitMessageEditModeAndKeepText()
+		window.messageInput.SetText("")
+	}
 }
 
 func (window *Window) exitMessageEditModeAndKeepText() {
 	window.editingMessageID = nil
 	window.messageInput.SetBorderColor(tview.Styles.BorderColor)
 	window.messageInput.SetBorderFocusColor(tview.Styles.BorderFocusColor)
-	if vtxxx {
+	if tview.IsVtxxx {
 		window.messageInput.SetBorderFocusAttributes(tcell.AttrBold)
 		window.messageInput.SetBorderAttributes(tcell.AttrNone)
 	}
@@ -2556,6 +2418,9 @@ func (window *Window) SwitchToGuildsPage() {
 	window.leftArea.AddItem(window.guildPage, 0, 1, false)
 	window.activeView = Guilds
 
+	window.userList.internalTreeView.SetNextFocusableComponents(tview.Right, window.guildList)
+	window.chatView.internalTextView.SetNextFocusableComponents(tview.Left, window.guildList)
+	window.chatView.internalTextView.SetNextFocusableComponents(tview.Right, window.userList.internalTreeView, window.guildList)
 }
 
 //SwitchToFriendsPage switches the left side of the layout over to the view
@@ -2566,123 +2431,181 @@ func (window *Window) SwitchToFriendsPage() {
 	window.leftArea.AddItem(window.guildList, 1, 0, false)
 	window.leftArea.AddItem(window.privateList.GetComponent(), 0, 1, false)
 	window.activeView = Dms
+
+	window.userList.internalTreeView.SetNextFocusableComponents(tview.Right, window.privateList.internalTreeView)
+	window.chatView.internalTextView.SetNextFocusableComponents(tview.Left, window.privateList.internalTreeView)
+	window.chatView.internalTextView.SetNextFocusableComponents(tview.Right, window.userList.internalTreeView, window.privateList.internalTreeView)
 }
 
 // SwitchToPreviousChannel loads the previously loaded channel and focuses it
 // in it's respective UI primitive.
 func (window *Window) SwitchToPreviousChannel() error {
-	if window.previousChannel == nil || window.previousChannel == window.selectedChannel {
+	previousChannel := window.previousChannel
+	if previousChannel == nil || previousChannel == window.selectedChannel {
 		// No previous channel.
 		return nil
 	}
 
-	_, err := window.session.State.Channel(window.previousChannel.ID)
-	if err != nil {
+	_, channelStateError := window.session.State.Channel(previousChannel.ID)
+	if channelStateError != nil {
 		window.previousChannel = nil
-		window.previousChannelNode = nil
-		return fmt.Errorf("Channel %s not found", window.previousChannel.Name)
+		return fmt.Errorf("channel %s not found", previousChannel.Name)
 	}
 
-	// Switch to appropriate layout.
-	switch window.previousChannel.Type {
-	case discordgo.ChannelTypeDM, discordgo.ChannelTypeGroupDM:
+	if previousChannel.GuildID == "" {
 		window.SwitchToFriendsPage()
+		window.privateList.onChannelSelect(window.previousChannel.ID)
+	} else {
+		_, guildStateError := window.session.State.Guild(previousChannel.GuildID)
+		if guildStateError != nil {
+			window.previousChannel = nil
+			return fmt.Errorf("Unable to load guild: %s", previousChannel.GuildID)
+		}
 
-		window.privateList.onChannelSelect(window.previousChannelNode, window.previousChannel.ID)
-	case discordgo.ChannelTypeGuildText:
-		_, err := window.session.State.Guild(window.previousGuild.ID)
-		if err != nil {
-			window.previousGuild = nil
-			window.previousGuildNode = nil
-			return fmt.Errorf("Unable to load guild: %s", window.previousGuild.Name)
+		if !discordutil.HasReadMessagesPermission(previousChannel.ID, window.session.State) {
+			window.previousChannel = nil
+			return fmt.Errorf("No read permissions for channel: %s", previousChannel.Name)
 		}
-		if !discordutil.HasReadMessagesPermission(window.previousChannel.ID, window.session.State) {
-			return fmt.Errorf("No read permissions for channel: %s", window.previousChannel.Name)
-		}
+
 		window.SwitchToGuildsPage()
-		window.guildList.SetCurrentNode(window.previousGuildNode)
-		window.guildList.onGuildSelect(window.previousGuildNode, window.previousGuild.ID)
-		window.channelTree.SetCurrentNode(window.previousChannelNode)
-		window.channelTree.onChannelSelect(window.previousChannel.ID)
-	default:
-		return fmt.Errorf("Invalid channel type: %v", window.previousChannel.Type)
+		window.guildList.onGuildSelect(previousChannel.GuildID)
+		window.channelTree.onChannelSelect(previousChannel.ID)
+
+		previousGuildNode := tviewutil.GetNodeByReference(previousChannel.GuildID, window.guildList.TreeView)
+		previousChannelNode := tviewutil.GetNodeByReference(previousChannel.ID, window.channelTree.TreeView)
+		window.guildList.SetCurrentNode(previousGuildNode)
+		window.channelTree.SetCurrentNode(previousChannelNode)
 	}
+
 	window.app.SetFocus(window.messageInput.internalTextView)
 	return nil
 }
 
-//RefreshLayout removes and adds the main parts of the layout
-//so that the ones that are disabled by settings do not show up.
-func (window *Window) RefreshLayout() {
-	window.userList.internalTreeView.SetVisible(config.Current.ShowUserContainer && (window.selectedGuild != nil ||
-		(window.selectedChannel != nil && window.selectedChannel.Type == discordgo.ChannelTypeGroupDM)))
+// updateUserList decides whether the userlist should be shown according to
+// the current window state. Depending on the result, the list is cleared
+// and loaded.
+func (window *Window) updateUserList() {
+	selectedGuild := window.selectedGuild
+	selectedChannel := window.selectedChannel
+	showUserList := config.Current.ShowUserContainer &&
+		//We want to show it always when a guild is loaded.
+		(selectedGuild != nil &&
+			//This means also when no channel is loaded.
+			(selectedChannel == nil ||
+				//However, if there is a lodaded channel and it is a DM, this component
+				//is basically useless, as it's obvious who's part of the channel.
+				selectedChannel.Type != discordgo.ChannelTypeDM))
 
+	//If the userList was focused before, we focus the input, so that the
+	//user can still properly navigate around via alt+arrowkey.
+	if !showUserList && window.app.GetFocus() == window.userList.internalTreeView {
+		window.app.SetFocus(window.messageInput.GetPrimitive())
+	}
+
+	previousVisibleState := window.userList.internalTreeView.IsVisible()
+	window.userList.internalTreeView.SetVisible(showUserList)
+	if previousVisibleState != showUserList {
+		//We make sure relayouting happens right now, so that things like the
+		//chatview can correctly adapt to the new layout.
+		window.ForceRedraw()
+	}
+
+	if showUserList {
+		if selectedChannel != nil && selectedChannel.Type == discordgo.ChannelTypeGroupDM {
+			window.userList.LoadGroup(selectedChannel.ID)
+		} else if selectedGuild != nil {
+			window.userList.LoadGuild(selectedGuild.ID)
+		} else {
+			window.userList.Clear()
+		}
+	} else {
+		window.userList.Clear()
+	}
+}
+
+// ApplyFixedLayoutSettings applies the current settings for the FixedLayout
+// to the window. This means resizing the components.
+func (window *Window) ApplyFixedLayoutSettings() {
 	if config.Current.UseFixedLayout {
-		window.middleContainer.ResizeItem(window.leftArea, config.Current.FixedSizeLeft, 7)
+		window.middleContainer.ResizeItem(window.leftArea, config.Current.FixedSizeLeft, 0)
 		window.middleContainer.ResizeItem(window.chatArea, 0, 1)
-		window.middleContainer.ResizeItem(window.userList.internalTreeView, config.Current.FixedSizeRight, 6)
+		window.middleContainer.ResizeItem(window.userList.internalTreeView, config.Current.FixedSizeRight, 0)
 	} else {
 		window.middleContainer.ResizeItem(window.leftArea, 0, 7)
 		window.middleContainer.ResizeItem(window.chatArea, 0, 20)
 		window.middleContainer.ResizeItem(window.userList.internalTreeView, 0, 6)
 	}
+}
 
-	window.app.ForceDraw()
+// UnloadChannel resets the windows to the state at which no channel has
+// been loaded yet.
+func (window *Window) UnloadChannel() {
+	currentChannel := window.selectedChannel
+	//NO-OP, nothing to do here.
+	if currentChannel == nil {
+		return
+	}
+
+	//window.selectedGuild is kept, as just the chatview is unloaded, but not
+	//the channel tree.
+	window.selectedChannel = nil
+	window.previousChannel = currentChannel
+
+	window.chatView.ClearViewAndCache()
+	window.UpdateChatHeader(nil)
+	window.exitMessageEditModeAndKeepText()
+
+	hasBeenRead := readstate.HasBeenRead(currentChannel, currentChannel.LastMessageID)
+	if currentChannel.Type == discordgo.ChannelTypeDM || currentChannel.Type == discordgo.ChannelTypeGroupDM {
+		if hasBeenRead {
+			window.privateList.MarkAsRead(currentChannel.ID)
+		} else {
+			window.privateList.MarkAsUnread(currentChannel.ID)
+		}
+	} else {
+		if hasBeenRead {
+			window.channelTree.MarkAsRead(currentChannel.ID)
+		} else {
+			window.channelTree.MarkAsUnread(currentChannel.ID)
+		}
+	}
 }
 
 //LoadChannel eagerly loads the channels messages.
 func (window *Window) LoadChannel(channel *discordgo.Channel) error {
+	window.UnloadChannel()
+
+	var guild *discordgo.Guild
+	if channel.GuildID != "" {
+		var cacheError error
+		guild, cacheError = window.session.State.Guild(channel.GuildID)
+		if cacheError != nil {
+			return cacheError
+		}
+	}
+
 	messages, loadError := window.messageLoader.LoadMessages(channel)
 	if loadError != nil {
 		return loadError
 	}
-
 	discordutil.SortMessagesByTimestamp(messages)
 
-	window.chatView.SetMessages(messages)
-	window.chatView.ClearSelection()
-	window.chatView.internalTextView.ScrollToEnd()
+	window.selectedChannel = channel
+	//This happens before setting the messages into the view, to avoid
+	//incorrectly drawing the date separators initially.
+	window.updateUserList()
 
+	//FIXME Only slow function here. 200-500 MS depending on content.
+	//That's horrible!
+	window.chatView.SetMessages(messages)
+	window.chatView.internalTextView.ScrollToEnd()
 	window.UpdateChatHeader(channel)
 
-	if window.selectedChannel == nil {
-		window.previousChannel = channel
-		window.previousChannelNode = window.channelTree.GetCurrentNode()
-	} else if channel != window.selectedChannel {
-		window.previousChannel = window.selectedChannel
-		window.previousChannelNode = window.selectedChannelNode
-
-		// When switching to a channel in the same guild, the previousGuild must be set.
-		if window.previousChannel.GuildID == channel.GuildID {
-			window.previousGuild = window.selectedGuild
-			window.previousGuildNode = window.selectedGuildNode
-		}
-	}
-
-	//If there is a currently loaded guild channel and it isn't the same as
-	//the new one we assume it must be read and mark it white.
-	if window.selectedChannelNode != nil && channel.ID != window.selectedChannel.ID {
-		window.selectedChannelNode.SetColor(tview.Styles.PrimaryTextColor)
-	}
-
-	window.selectedChannel = channel
-	//FIXME this is a bit bad, since it could be wrong
-	window.selectedChannelNode = window.channelTree.GetCurrentNode()
-
-	//Unlike with the channel, where we can assume it is read, we gotta check
-	//whether there is still an unread channel and mark the server accordingly.
-	wasSelectedGuild := window.selectedGuild != nil && window.selectedGuild.ID != channel.GuildID
-
-	if channel.GuildID == "" {
-		window.selectedGuild = nil
-		window.selectedGuildNode = nil
-	}
-
 	if channel.Type == discordgo.ChannelTypeDM || channel.Type == discordgo.ChannelTypeGroupDM {
-		window.privateList.MarkChannelAsLoaded(channel)
+		window.privateList.MarkAsLoaded(channel.ID)
+	} else {
+		window.channelTree.MarkAsLoaded(channel.ID)
 	}
-
-	window.exitMessageEditModeAndKeepText()
 
 	if config.Current.FocusMessageInputAfterChannelSelection {
 		window.app.SetFocus(window.messageInput.internalTextView)
@@ -2693,29 +2616,12 @@ func (window *Window) LoadChannel(channel *discordgo.Channel) error {
 		// Here we make the assumption that the channel we are loading must be part
 		// of the currently loaded guild, since we don't allow loading a channel of
 		// a guild otherwise.
-		if channel.GuildID != "" {
-			guild, cacheError := window.session.State.Guild(channel.GuildID)
-
+		if guild != nil {
 			window.app.QueueUpdateDraw(func() {
-				if wasSelectedGuild {
-					window.updateServerReadStatus(window.selectedGuildNode, false)
-				}
-
-				if cacheError == nil {
-					window.selectedGuild = guild
-					for _, guildNode := range window.guildList.GetRoot().GetChildren() {
-						if guildNode.GetReference() == channel.GuildID {
-							window.guildList.SetCurrentNode(guildNode)
-							if vtxxx {
-								guildNode.SetAttributes(tcell.AttrUnderline)
-							} else {
-								guildNode.SetColor(tview.Styles.ContrastBackgroundColor)
-							}
-							window.selectedGuildNode = guildNode
-							break
-						}
-					}
-				}
+				//Since we are in a background thread, we assume that the
+				//selected guild could have technically changed in the meantime.
+				selectedGuild := window.selectedGuild
+				window.updateServerReadStatus(channel.GuildID, selectedGuild != nil && window.selectedGuild.ID == channel.GuildID)
 			})
 		}
 	}()
@@ -2729,17 +2635,16 @@ func (window *Window) LoadChannel(channel *discordgo.Channel) error {
 // in a group dm channel. If the channel has a nickname, that is chosen.
 func (window *Window) UpdateChatHeader(channel *discordgo.Channel) {
 	if channel == nil {
+		window.chatView.SetTitle("")
 		return
 	}
 
-	if channel.Type == discordgo.ChannelTypeGuildText {
+	if channel.GuildID != "" {
 		if channel.Topic != "" {
 			window.chatView.SetTitle(channel.Name + " - " + channel.Topic)
 		} else {
 			window.chatView.SetTitle(channel.Name)
 		}
-	} else if channel.Type == discordgo.ChannelTypeDM {
-		window.chatView.SetTitle(channel.Recipients[0].Username)
 	} else {
 		window.chatView.SetTitle(discordutil.GetPrivateChannelName(channel))
 	}
@@ -2770,7 +2675,7 @@ func (window *Window) GetSelectedChannel() *discordgo.Channel {
 // PromptSecretInput shows a fullscreen input dialog that masks the user input.
 // The returned value will either be empty or what the user has entered.
 func (window *Window) PromptSecretInput(title, message string) string {
-	return tviewutil.PrompSecretSingleLineInput(window.app, title, message)
+	return PrompSecretSingleLineInput(window.app, title, message)
 }
 
 // ForceRedraw triggers ForceDraw on the underlying tview application, causing

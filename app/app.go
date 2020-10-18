@@ -39,12 +39,12 @@ func RunWithAccount(account string) {
 	runNext := make(chan bool, 1)
 
 	configuration, configLoadError := config.LoadConfig()
-	if strings.TrimSpace(account) != "" {
-		configuration.Token = configuration.GetAccountToken(account)
-	}
-
 	if configLoadError != nil {
 		log.Fatalf("Error loading configuration file (%s).\n", configLoadError.Error())
+	}
+
+	if strings.TrimSpace(account) != "" {
+		configuration.Token = configuration.GetAccountToken(account)
 	}
 
 	updateAvailableChannel := make(chan bool, 1)
@@ -156,6 +156,7 @@ func RunWithAccount(account string) {
 			window.RegisterCommand(tfaDisableCmd)
 			window.RegisterCommand(tfaBackupGetCmd)
 			window.RegisterCommand(tfaBackupResetCmd)
+			window.RegisterCommand(commandimpls.NewDMOpenCmd(discord, window))
 		})
 	}()
 
@@ -192,6 +193,11 @@ func attemptLogin(loginScreen *ui.Login, loginMessage string, configuration *con
 	if discordError != nil {
 		configuration.Token = ""
 		return attemptLogin(loginScreen, fmt.Sprintf("Error during last login attempt:\n\n[red]%s", discordError), configuration)
+	}
+
+	if session == nil {
+		configuration.Token = ""
+		return attemptLogin(loginScreen, "Error during last login attempt:\n\n[red]Received session is nil", configuration)
 	}
 
 	readyChan := make(chan *discordgo.Ready, 1)

@@ -85,28 +85,32 @@ type Box struct {
 
 	// Handler that gets called when this component loses focus.
 	onBlur func()
+
+	nextFocusableComponents map[FocusDirection][]Primitive
+	parent                  Primitive
 }
 
 // NewBox returns a Box without a border.
 func NewBox() *Box {
 	b := &Box{
-		width:                 15,
-		height:                10,
-		innerX:                -1, // Mark as uninitialized.
-		backgroundColor:       Styles.PrimitiveBackgroundColor,
-		borderColor:           Styles.BorderColor,
-		borderFocusColor:      Styles.BorderFocusColor,
-		borderFocusAttributes: tcell.AttrNone,
-		titleColor:            Styles.TitleColor,
-		titleAlign:            AlignCenter,
-		borderTop:             true,
-		borderBottom:          true,
-		borderLeft:            true,
-		borderRight:           true,
-		visible:               true,
+		width:                   15,
+		height:                  10,
+		innerX:                  -1, // Mark as uninitialized.
+		backgroundColor:         Styles.PrimitiveBackgroundColor,
+		borderColor:             Styles.BorderColor,
+		borderFocusColor:        Styles.BorderFocusColor,
+		borderFocusAttributes:   tcell.AttrNone,
+		titleColor:              Styles.TitleColor,
+		titleAlign:              AlignCenter,
+		borderTop:               true,
+		borderBottom:            true,
+		borderLeft:              true,
+		borderRight:             true,
+		visible:                 true,
+		nextFocusableComponents: make(map[FocusDirection][]Primitive),
 	}
 
-	if vtxxx {
+	if IsVtxxx {
 		b.borderFocusAttributes = tcell.AttrBold
 	}
 
@@ -218,19 +222,21 @@ func (b *Box) GetDrawFunc() func(screen tcell.Screen, x, y, width, height int) (
 // on to the provided (default) input handler.
 //
 // This is only meant to be used by subclassing primitives.
-func (b *Box) WrapInputHandler(inputHandler func(*tcell.EventKey, func(p Primitive))) func(*tcell.EventKey, func(p Primitive)) {
-	return func(event *tcell.EventKey, setFocus func(p Primitive)) {
+func (b *Box) WrapInputHandler(inputHandler InputHandlerFunc) InputHandlerFunc {
+	return func(event *tcell.EventKey, setFocus func(p Primitive)) *tcell.EventKey {
 		if b.inputCapture != nil {
 			event = b.inputCapture(event)
 		}
 		if event != nil && inputHandler != nil {
-			inputHandler(event, setFocus)
+			event = inputHandler(event, setFocus)
 		}
+
+		return event
 	}
 }
 
 // InputHandler returns nil.
-func (b *Box) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
+func (b *Box) InputHandler() InputHandlerFunc {
 	return b.WrapInputHandler(nil)
 }
 
@@ -338,14 +344,6 @@ func (b *Box) IsBorderRight() bool {
 // this primitive.
 func (b *Box) IsBorderLeft() bool {
 	return b.border && b.borderLeft
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-
-	return b
 }
 
 // SetBorderAttributes sets the border's style attributes. You can combine
@@ -568,6 +566,29 @@ func (b *Box) Blur() {
 	}
 }
 
+// SetNextFocusableComponents decides which components are to be focused using
+// a certain focus direction. If more than one component is passed, the
+// priority goes from left-most to right-most. A component will be skipped if
+// it is not visible.
+func (b *Box) SetNextFocusableComponents(direction FocusDirection, components ...Primitive) {
+	b.nextFocusableComponents[direction] = components
+}
+
+// NextFocusableComponent decides which component should receive focus next.
+// If nil is returned, the focus is retained.
+func (b *Box) NextFocusableComponent(direction FocusDirection) Primitive {
+	components, avail := b.nextFocusableComponents[direction]
+	if avail {
+		for _, comp := range components {
+			if comp.IsVisible() {
+				return comp
+			}
+		}
+	}
+
+	return nil
+}
+
 // HasFocus returns whether or not this primitive has focus.
 func (b *Box) HasFocus() bool {
 	return b.hasFocus
@@ -583,6 +604,15 @@ func (b *Box) GetFocusable() Focusable {
 func (b *Box) SetIndicateOverflow(indicateOverflow bool) *Box {
 	b.indicateOverflow = indicateOverflow
 	return b
+}
+
+func (b *Box) SetParent(parent Primitive) {
+	//Reparenting is possible!
+	b.parent = parent
+}
+
+func (b *Box) GetParent() Primitive {
+	return b.parent
 }
 
 func (b *Box) drawOverflow(screen tcell.Screen, showTop, showBottom bool) {

@@ -11,12 +11,16 @@ import (
 	"github.com/gdamore/tcell"
 
 	"github.com/Bios-Marcel/cordless/config"
+	"github.com/Bios-Marcel/cordless/tview"
+	"github.com/Bios-Marcel/cordless/ui/tviewutil"
 )
 
 var (
 	globalScope        = addScope("global", "Application wide", nil)
 	multilineTextInput = addScope("multiline_text_input", "Multiline text input", globalScope)
 	chatview           = addScope("chatview", "Chatview", globalScope)
+	guildlist          = addScope("guildlist", "Guildlist", globalScope)
+	channeltree        = addScope("channeltree", "Channeltree", globalScope)
 
 	QuoteSelectedMessage = addShortcut("quote_selected_message", "Quote selected message",
 		chatview, tcell.NewEventKey(tcell.KeyRune, 'q', tcell.ModNone))
@@ -26,6 +30,8 @@ var (
 		chatview, tcell.NewEventKey(tcell.KeyRune, 'd', tcell.ModNone))
 	ReplySelectedMessage = addShortcut("reply_selected_message", "Reply to author selected message",
 		chatview, tcell.NewEventKey(tcell.KeyRune, 'r', tcell.ModNone))
+	NewDirectMessage = addShortcut("new_direct_message", "Create a new direct message channel with this user",
+		chatview, tcell.NewEventKey(tcell.KeyRune, 'p', tcell.ModNone))
 	CopySelectedMessageLink = addShortcut("copy_selected_message_link", "Copy link to selected message",
 		chatview, tcell.NewEventKey(tcell.KeyRune, 'l', tcell.ModNone))
 	CopySelectedMessage = addShortcut("copy_selected_message", "Copy content of selected message",
@@ -34,8 +40,16 @@ var (
 		chatview, tcell.NewEventKey(tcell.KeyRune, 's', tcell.ModNone))
 	DeleteSelectedMessage = addShortcut("delete_selected_message", "Delete the selected message",
 		chatview, tcell.NewEventKey(tcell.KeyDelete, 0, tcell.ModNone))
-	ViewSelectedMessageImages = addShortcut("view_selected_message_images", "View selected message's attached images",
+	ViewSelectedMessageImages = addShortcut("view_selected_message_images", "View selected message's attached files",
 		chatview, tcell.NewEventKey(tcell.KeyRune, 'o', tcell.ModNone))
+	ChatViewSelectionUp = addShortcut("selection_up", "Move selection up by one",
+		chatview, tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModNone))
+	ChatViewSelectionDown = addShortcut("selection_down", "Move selection down by one",
+		chatview, tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	ChatViewSelectionTop = addShortcut("selection_top", "Move selection to the upmost message",
+		chatview, tcell.NewEventKey(tcell.KeyHome, 0, tcell.ModNone))
+	ChatViewSelectionBottom = addShortcut("selection_bottom", "Move selection to the downmost message",
+		chatview, tcell.NewEventKey(tcell.KeyEnd, 0, tcell.ModNone))
 
 	ExpandSelectionToLeft = addShortcut("expand_selection_word_to_left", "Expand selection word to left",
 		multilineTextInput, tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModShift))
@@ -98,6 +112,15 @@ var (
 	ExitApplication = addShortcut("exit_application", "Exit application",
 		globalScope, tcell.NewEventKey(tcell.KeyCtrlC, rune(tcell.KeyCtrlC), tcell.ModCtrl))
 
+	FocusUp = addShortcut("focus_up", "Focus the next widget above",
+		globalScope, tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModAlt))
+	FocusDown = addShortcut("focus_down", "Focus the next widget below",
+		globalScope, tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModAlt))
+	FocusLeft = addShortcut("focus_left", "Focus the next widget to the left",
+		globalScope, tcell.NewEventKey(tcell.KeyLeft, 0, tcell.ModAlt))
+	FocusRight = addShortcut("focus_right", "Focus the next widget to the right",
+		globalScope, tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModAlt))
+
 	FocusChannelContainer = addShortcut("focus_channel_container", "Focus channel container",
 		globalScope, tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModAlt))
 	FocusUserContainer = addShortcut("focus_user_container", "Focus user container",
@@ -123,6 +146,12 @@ var (
 		globalScope, tcell.NewEventKey(tcell.KeyRune, '.', tcell.ModAlt))
 	ToggleBareChat = addShortcut("toggle_bare_chat", "Toggle bare chat",
 		globalScope, tcell.NewEventKey(tcell.KeyCtrlB, rune(tcell.KeyCtrlB), tcell.ModCtrl))
+
+	GuildListMarkRead = addShortcut("guild_mark_read", "Mark server as read",
+		guildlist, tcell.NewEventKey(tcell.KeyCtrlR, rune(tcell.KeyCtrlR), tcell.ModCtrl))
+
+	ChannelTreeMarkRead = addShortcut("channel_mark_read", "Mark channel as read",
+		channeltree, tcell.NewEventKey(tcell.KeyCtrlR, rune(tcell.KeyCtrlR), tcell.ModCtrl))
 
 	scopes    []*Scope
 	Shortcuts []*Shortcut
@@ -343,5 +372,21 @@ func Persist() error {
 		return writeError
 	}
 
+	return nil
+}
+
+func DirectionalFocusHandling(event *tcell.EventKey, app *tview.Application) *tcell.EventKey {
+	focused := app.GetFocus()
+	if FocusUp.Equals(event) {
+		tviewutil.FocusNextIfPossible(tview.Up, app, focused)
+	} else if FocusDown.Equals(event) {
+		tviewutil.FocusNextIfPossible(tview.Down, app, focused)
+	} else if FocusLeft.Equals(event) {
+		tviewutil.FocusNextIfPossible(tview.Left, app, focused)
+	} else if FocusRight.Equals(event) {
+		tviewutil.FocusNextIfPossible(tview.Right, app, focused)
+	} else {
+		return event
+	}
 	return nil
 }
