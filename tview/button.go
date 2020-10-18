@@ -1,9 +1,6 @@
 package tview
 
 import (
-	"os"
-	"regexp"
-
 	"github.com/gdamore/tcell"
 )
 
@@ -32,16 +29,6 @@ type Button struct {
 	// key is provided indicating which key was pressed to leave (tab or backtab).
 	blur func(tcell.Key)
 }
-
-func checkVT() bool {
-	VTxxx, err := regexp.MatchString("(vt)[0-9]+", os.Getenv("TERM"))
-	if err != nil {
-		panic(err)
-	}
-	return VTxxx
-}
-
-var vtxxx bool = checkVT()
 
 // NewButton returns a new input field.
 func NewButton(label string) *Button {
@@ -119,13 +106,13 @@ func (b *Button) Draw(screen tcell.Screen) bool {
 	// Draw the box.
 	borderColor := b.borderColor
 	backgroundColor := b.backgroundColor
-	if vtxxx {
+	if IsVtxxx {
 		b.reverse = false
 	}
 	if b.focus.HasFocus() {
 		b.backgroundColor = b.backgroundColorActivated
 		b.borderColor = b.labelColorActivated
-		if vtxxx {
+		if IsVtxxx {
 			b.reverse = true
 		}
 		defer func() {
@@ -155,18 +142,22 @@ func (b *Button) Draw(screen tcell.Screen) bool {
 }
 
 // InputHandler returns the handler for this primitive.
-func (b *Button) InputHandler() func(event *tcell.EventKey, setFocus func(p Primitive)) {
-	return b.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p Primitive)) {
+func (b *Button) InputHandler() InputHandlerFunc {
+	return b.WrapInputHandler(func(event *tcell.EventKey, setFocus func(p Primitive)) *tcell.EventKey {
 		// Process key event.
 		switch key := event.Key(); key {
 		case tcell.KeyEnter: // Selected.
 			if b.selected != nil {
 				b.selected()
 			}
+			return nil
 		case tcell.KeyBacktab, tcell.KeyTab, tcell.KeyEscape: // Leave. No action.
 			if b.blur != nil {
 				b.blur(key)
 			}
+			return nil
 		}
+
+		return event
 	})
 }

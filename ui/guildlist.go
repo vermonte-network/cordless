@@ -65,27 +65,20 @@ func NewGuildList(guilds []*discordgo.Guild) *GuildList {
 }
 
 // UpdateNodeStateByGuild updates the state of a guilds node accordingly
-// to its readstate, unless the node is selected.
-//
-// FIXME selected should probably be removed here, but bugs will occur
-// so I'll do it someday ... :D
-func (g *GuildList) UpdateNodeStateByGuild(guild *discordgo.Guild, selected bool) {
+// to its readstate, unless the guild represented by that node is loaded.
+func (g *GuildList) UpdateNodeStateByGuild(guild *discordgo.Guild, loaded bool) {
 	matchedNode := tviewutil.GetNodeByReference(guild.ID, g.TreeView)
 	if matchedNode != nil {
-		g.updateNodeState(guild, matchedNode, selected)
+		g.updateNodeState(guild, matchedNode, loaded)
 	}
 }
 
-func (g *GuildList) updateNodeState(guild *discordgo.Guild, node *tview.TreeNode, selected bool) {
-	if selected {
-		if vtxxx {
-			node.SetAttributes(tcell.AttrUnderline)
-		} else {
-			node.SetColor(tview.Styles.ContrastBackgroundColor)
-		}
+func (g *GuildList) updateNodeState(guild *discordgo.Guild, node *tview.TreeNode, loaded bool) {
+	if loaded {
+		g.markNodeAsLoaded(node)
 	} else {
 		if !readstate.HasGuildBeenRead(guild.ID) {
-			if vtxxx {
+			if tview.IsVtxxx {
 				node.SetAttributes(tcell.AttrBlink)
 			} else {
 				node.SetColor(config.GetTheme().AttentionColor)
@@ -96,10 +89,11 @@ func (g *GuildList) updateNodeState(guild *discordgo.Guild, node *tview.TreeNode
 		}
 	}
 
+	//Prefix order doesn't matter for now, as we never have more than one.
 	if readstate.HasGuildBeenMentioned(guild.ID) {
-		node.SetText("(@) " + tviewutil.Escape(guild.Name))
+		node.AddPrefix(mentionedIndicator)
 	} else {
-		node.SetText(tviewutil.Escape(guild.Name))
+		node.RemovePrefix(mentionedIndicator)
 	}
 }
 
@@ -111,16 +105,11 @@ func (g *GuildList) SetOnGuildSelect(handler func(guildID string)) {
 // RemoveGuild removes the node that refers to the given guildID.
 func (g *GuildList) RemoveGuild(guildID string) {
 	children := g.GetRoot().GetChildren()
-	indexToRemove := -1
 	for index, node := range children {
 		if node.GetReference() == guildID {
-			indexToRemove = index
+			g.GetRoot().SetChildren(append(children[:index], children[index+1:]...))
 			break
 		}
-	}
-
-	if indexToRemove != -1 {
-		g.GetRoot().SetChildren(append(children[:indexToRemove], children[indexToRemove+1:]...))
 	}
 }
 
@@ -134,11 +123,9 @@ func (g *GuildList) AddGuild(guildID, name string) {
 
 // UpdateName updates the name of the guild with the given ID.
 func (g *GuildList) UpdateName(guildID, newName string) {
-	for _, node := range g.GetRoot().GetChildren() {
-		if node.GetReference() == guildID {
-			node.SetText(tviewutil.Escape(newName))
-			break
-		}
+	node := tviewutil.GetNodeByReference(guildID, g.TreeView)
+	if node != nil {
+		node.SetText(tviewutil.Escape(newName))
 	}
 }
 
@@ -150,7 +137,7 @@ func (g *GuildList) setNotificationCount(count int) {
 	}
 }
 
-func (g *GuildList) amountOfUnreadGuilds() int {
+func (g *GuildList) countUnreadGuilds() int {
 	var unreadCount int
 	for _, child := range g.GetRoot().GetChildren() {
 		if !readstate.HasGuildBeenRead((child.GetReference()).(string)) {
@@ -164,5 +151,22 @@ func (g *GuildList) amountOfUnreadGuilds() int {
 // UpdateUnreadGuildCount finds the number of guilds containing unread
 // channels and updates the title accordingly.
 func (g *GuildList) UpdateUnreadGuildCount() {
-	g.setNotificationCount(g.amountOfUnreadGuilds())
+	g.setNotificationCount(g.countUnreadGuilds())
+}
+
+// MarkAsLoaded selects the guild and marks it as loaded.
+func (g *GuildList) MarkAsLoaded(guildID string) {
+	guildNode := tviewutil.GetNodeByReference(guildID, g.TreeView)
+	if guildNode != nil {
+		g.SetCurrentNode(guildNode)
+		g.markNodeAsLoaded(guildNode)
+	}
+}
+
+func (g *GuildList) markNodeAsLoaded(node *tview.TreeNode) {
+	if tview.IsVtxxx {
+		node.SetAttributes(tcell.AttrUnderline)
+	} else {
+		node.SetColor(tview.Styles.ContrastBackgroundColor)
+	}
 }

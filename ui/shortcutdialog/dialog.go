@@ -2,8 +2,6 @@ package shortcutdialog
 
 import (
 	"log"
-	"os"
-	"regexp"
 
 	"github.com/Bios-Marcel/cordless/shortcuts"
 	"github.com/Bios-Marcel/cordless/tview"
@@ -12,16 +10,6 @@ import (
 	"github.com/Bios-Marcel/cordless/config"
 	"github.com/Bios-Marcel/cordless/ui/tviewutil"
 )
-
-func checkVT() bool {
-	VTxxx, err := regexp.MatchString("(vt)[0-9]+", os.Getenv("TERM"))
-	if err != nil {
-		panic(err)
-	}
-	return VTxxx
-}
-
-var vtxxx = checkVT()
 
 func ShowShortcutsDialog(app *tview.Application, onClose func()) {
 	var table *ShortcutTable
@@ -32,8 +20,6 @@ func ShowShortcutsDialog(app *tview.Application, onClose func()) {
 	table = NewShortcutTable()
 	table.SetShortcuts(shortcuts.Shortcuts)
 
-	table.SetOnClose(onClose)
-
 	exitButton = tview.NewButton("Go back")
 	exitButton.SetSelectedFunc(onClose)
 	exitButton.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -41,11 +27,11 @@ func ShowShortcutsDialog(app *tview.Application, onClose func()) {
 			app.SetFocus(table.GetPrimitive())
 		} else if event.Key() == tcell.KeyBacktab {
 			app.SetFocus(resetButton)
-		} else if event.Key() == tcell.KeyESC {
-			onClose()
+		} else {
+			return event
 		}
 
-		return event
+		return nil
 	})
 
 	resetButton = tview.NewButton("Restore all defaults")
@@ -56,18 +42,17 @@ func ShowShortcutsDialog(app *tview.Application, onClose func()) {
 		shortcuts.Persist()
 
 		table.SetShortcuts(shortcuts.Shortcuts)
-		app.ForceDraw()
 	})
 	resetButton.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyTab {
 			app.SetFocus(exitButton)
 		} else if event.Key() == tcell.KeyBacktab {
 			app.SetFocus(table.GetPrimitive())
-		} else if event.Key() == tcell.KeyESC {
-			onClose()
+		} else {
+			return event
 		}
 
-		return event
+		return nil
 	})
 
 	primitiveBGColor := tviewutil.ColorToHex(config.GetTheme().PrimitiveBackgroundColor)
@@ -75,7 +60,7 @@ func ShowShortcutsDialog(app *tview.Application, onClose func()) {
 
 	shortcutDescription = tview.NewTextView()
 	shortcutDescription.SetDynamicColors(true).SetBorderPadding(1, 0, 0, 0)
-	if vtxxx {
+	if tview.IsVtxxx {
 		shortcutDescription.SetText("R [::r]Reset shortcut[::-]" +
 			"[::-]  Backspace [::r]Delete shortcut" +
 			"[::-]  Enter [::r]Change shortcut" +
@@ -98,7 +83,18 @@ func ShowShortcutsDialog(app *tview.Application, onClose func()) {
 
 	shortcutsView := tview.NewFlex()
 	shortcutsView.SetDirection(tview.FlexRow)
+	shortcutsView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if table.IsDefiningShortcut() {
+			return event
+		}
 
+		if event.Key() == tcell.KeyESC {
+			onClose()
+			return nil
+		}
+
+		return event
+	})
 	shortcutsView.AddItem(table.GetPrimitive(), 0, 1, false)
 	shortcutsView.AddItem(buttonBar, 1, 0, false)
 	shortcutsView.AddItem(shortcutDescription, 2, 0, false)
